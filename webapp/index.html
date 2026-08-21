@@ -42,6 +42,43 @@
     #time-label .lead { color: #8b90a0; }
     #meta { margin-top: 10px; font-size: 11px; color: #8b90a0; border-top: 1px solid #2a2f3d; padding-top: 8px; }
     #meta.error { color: #ff8080; }
+
+    /* 2026-08-21: bottom-right legend card + cursor hover tooltip, added
+       per Taylor's request (reference: a wildfire-probability map with a
+       bottom-right legend card showing swatches + range labels + a "Hide"
+       button). Adapted from that single-variable-colormap reference to our
+       4-class categorical scheme -- each class gets its own row, with the
+       row itself showing the 10 discrete opacity bands from
+       customClassFrag rather than one continuous gradient. */
+    #legend {
+      position: absolute; bottom: 12px; right: 12px; z-index: 10;
+      background: rgba(15, 18, 26, 0.88); color: #e6e8ee;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border-radius: 10px; padding: 10px 12px; min-width: 200px;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.35);
+    }
+    #legend-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; font-weight: 600; }
+    #legend-hide {
+      background: #1c2130; color: #c8cbd6; border: 1px solid #3a3f4d;
+      border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+    }
+    .legend-row { margin: 6px 0; }
+    .legend-label { font-size: 11px; color: #c8cbd6; margin-bottom: 2px; }
+    .legend-bands { display: flex; height: 10px; border-radius: 3px; overflow: hidden; }
+    .legend-band { flex: 1; }
+    .legend-range { display: flex; justify-content: space-between; font-size: 10px; color: #8b90a0; margin-top: 6px; }
+
+    /* Approximate hover readout -- see the big comment above
+       estimateClassAlpha() in the module script for how "probability at
+       the cursor" is derived from the rendered pixel color rather than
+       decoded zarr data (Taylor's explicit "Approximate" choice). */
+    #hover-tooltip {
+      position: fixed; z-index: 20; pointer-events: none; display: none;
+      background: rgba(15, 18, 26, 0.92); color: #e6e8ee;
+      font: 12px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border-radius: 8px; padding: 6px 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -59,6 +96,18 @@
     </div>
     <div id="meta">loading…</div>
   </div>
+
+  <div id="legend">
+    <div id="legend-header">
+      <span>Front probability</span>
+      <button id="legend-hide" type="button">Hide</button>
+    </div>
+    <div id="legend-content">
+      <div id="legend-body"></div>
+      <div class="legend-range"><span id="legend-range-lo">0.01</span><span id="legend-range-hi">1.0</span></div>
+    </div>
+  </div>
+  <div id="hover-tooltip"></div>
 
   <script type="importmap">
     {
@@ -184,6 +233,15 @@
       style: "https://tiles.openfreemap.org/styles/positron",
       center: [-95, 40],
       zoom: 3,
+      // 2026-08-21: needed for the hover tooltip's gl.readPixels() call
+      // below -- without this, the WebGL drawing buffer is cleared/swapped
+      // out immediately after each frame renders, so reading it back from
+      // a mousemove handler (which runs on its own, outside the render
+      // loop) returns all zeros. Confirmed this was the actual cause of an
+      // earlier, unrelated readPixels-always-zero problem investigated via
+      // the browser console. Costs a bit of extra GPU memory/bandwidth for
+      // the preserved buffer; negligible at this map's scale.
+      preserveDrawingBuffer: true,
     });
     let activeModel = "best_loss";
     // The full step list for the currently-loaded cycle (see
@@ -261,6 +319,165 @@
         }
         layersByStep.delete(oldestIndex);
       }
+    }
+
+    // -----------------------------------------------------------------
+    // Legend (bottom-right card) + approximate hover tooltip.
+    // 2026-08-21, per Taylor's request + attached reference screenshot.
+    //
+    // The hover readout is deliberately "approximate" (Taylor's explicit
+    // choice via AskUserQuestion, over fetching/decoding the real zarr
+    // array data for exact values): it reads the ALREADY-RENDERED pixel
+    // color under the cursor via gl.readPixels and works backward to
+    // "which of the 10 discrete opacity bands (see FRONT_BIN_WIDTH etc.
+    // above) produced this color", rather than looking at the underlying
+    // probability data at all. This is fast and needs no new dependencies,
+    // but has real, known limitations, listed here rather than discovered
+    // later:
+    //   1. The Positron basemap isn't pure white -- water, parks, and some
+    //      roads carry their own faint color. Those can read as a faint,
+    //      spurious front probability. HOVER_ALPHA_MIN below is a blunt
+    //      filter for this (small apparent signal is dropped rather than
+    //      shown), tuned empirically -- adjust it if basemap false
+    //      positives or missed-faint-fronts turn out to be a problem.
+    //   2. When two classes' fronts genuinely overlap at the same pixel,
+    //      the blend is sequential ( each layer draws over what's already
+    //      there), not additive -- estimateClassAlpha treats each class
+    //      independently as if it were the only thing composited over a
+    //      white background, which is only exactly right when at most one
+    //      class is present at that pixel. Multi-class overlap will read
+    //      as approximately, not exactly, right.
+    // If this turns out to be too rough in practice, the real fix is
+    // reading the decoded zarr array values directly (the data ZarrLayer
+    // already has in memory) instead of re-deriving them from pixels --
+    // that was the "Exact" option Taylor passed on this round.
+    // -----------------------------------------------------------------
+
+    function hexToRgb01(hex) {
+      const n = parseInt(hex.slice(1), 16);
+      return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+    }
+    const CLASS_RGB = Object.fromEntries(
+      Object.entries(CLASS_STYLE).map(([cls, style]) => [cls, hexToRgb01(style.color)])
+    );
+
+    function buildLegend() {
+      const body = document.getElementById("legend-body");
+      body.innerHTML = "";
+      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
+        const bands = [];
+        for (let bin = 0; bin < FRONT_N_BINS; bin++) {
+          const bandOpacity = (bin + 1) / FRONT_N_BINS;
+          bands.push(
+            `<span class="legend-band" style="background:${style.color}; opacity:${(0.85 * bandOpacity).toFixed(2)}"></span>`
+          );
+        }
+        const row = document.createElement("div");
+        row.className = "legend-row";
+        row.innerHTML = `
+          <div class="legend-label">${style.label}</div>
+          <div class="legend-bands">${bands.join("")}</div>
+        `;
+        body.appendChild(row);
+      }
+    }
+
+    // Undoes customClassFrag's alpha math for one class, given the
+    // rendered pixel's RGB (0-1) and that class's pure hue (0-1): assumes
+    // the pixel is `white*(1-a) + classRgb*a` (i.e. this class alone,
+    // composited over a white basemap) and solves for `a` via
+    // least-squares projection onto the (white - classRgb) direction. See
+    // the caveats in the big comment above.
+    function estimateClassAlpha(pixelRgb01, classRgb01) {
+      let num = 0;
+      let den = 0;
+      for (let i = 0; i < 3; i++) {
+        const dir = 1 - classRgb01[i]; // white[i] - classRgb01[i]
+        const diff = 1 - pixelRgb01[i]; // white[i] - pixelRgb01[i]
+        num += diff * dir;
+        den += dir * dir;
+      }
+      if (den === 0) return 0;
+      return Math.max(0, Math.min(1, num / den));
+    }
+
+    // Inverts customClassFrag's `bandOpacity = (bin + 1) / FRONT_N_BINS`
+    // to recover which of the 10 discrete bins produced a given alpha.
+    function binForBandOpacity(bandOpacity) {
+      const bin = Math.round(bandOpacity * FRONT_N_BINS) - 1;
+      return Math.max(0, Math.min(FRONT_N_BINS - 1, bin));
+    }
+
+    function binLabel(bin) {
+      const lo = bin === 0 ? FRONT_DISCARD_BELOW : bin * FRONT_BIN_WIDTH;
+      const hi = (bin + 1) * FRONT_BIN_WIDTH;
+      return `${lo.toFixed(2)}–${hi.toFixed(1)}`;
+    }
+
+    // Below this estimated bandOpacity, treat the pixel as "no front here"
+    // rather than report a value -- see limitation (1) in the big comment
+    // above. Half of the smallest real bin step is a starting point, not a
+    // carefully-tuned constant.
+    const HOVER_ALPHA_MIN = (FRONT_BIN_WIDTH / FRONT_N_BINS) * 0.5;
+
+    let hoverGl = null;
+    function getHoverGl() {
+      if (hoverGl) return hoverGl;
+      const canvas = map.getCanvas();
+      hoverGl = canvas.getContext("webgl2") || canvas.getContext("webgl");
+      return hoverGl;
+    }
+    const hoverPixelBuf = new Uint8Array(4);
+
+    function hideHoverTooltip() {
+      document.getElementById("hover-tooltip").style.display = "none";
+    }
+
+    function updateHoverTooltip(e) {
+      const tooltip = document.getElementById("hover-tooltip");
+      if (currentStepIndex === -1) {
+        hideHoverTooltip();
+        return;
+      }
+      const gl = getHoverGl();
+      if (!gl) {
+        hideHoverTooltip();
+        return;
+      }
+      const canvas = map.getCanvas();
+      const dpr = window.devicePixelRatio || 1;
+      const x = Math.round(e.point.x * dpr);
+      const yTop = Math.round(e.point.y * dpr);
+      const y = canvas.height - yTop - 1; // GL's origin is bottom-left, the map's is top-left
+      if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
+        hideHoverTooltip();
+        return;
+      }
+      gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, hoverPixelBuf);
+      const pixelRgb01 = [hoverPixelBuf[0] / 255, hoverPixelBuf[1] / 255, hoverPixelBuf[2] / 255];
+
+      const stepLayers = layersByStep.get(currentStepIndex);
+      const lines = [];
+      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
+        if (!classVisible.get(cls)) continue;
+        if (!stepLayers || !stepLayers.has(cls)) continue;
+        const alpha = estimateClassAlpha(pixelRgb01, CLASS_RGB[cls]);
+        const bandOpacity = alpha / 0.85; // undo the layer's fixed `opacity` multiply
+        if (bandOpacity < HOVER_ALPHA_MIN) continue;
+        const bin = binForBandOpacity(Math.min(1, bandOpacity));
+        lines.push(
+          `<span class="swatch" style="background:${style.color}"></span>${style.label}: ${binLabel(bin)}`
+        );
+      }
+
+      if (lines.length === 0) {
+        hideHoverTooltip();
+        return;
+      }
+      tooltip.innerHTML = lines.join("<br>");
+      tooltip.style.left = `${e.originalEvent.clientX + 14}px`;
+      tooltip.style.top = `${e.originalEvent.clientY + 14}px`;
+      tooltip.style.display = "block";
     }
 
     function setMeta(text, isError = false) {
@@ -436,6 +653,15 @@
     }
 
     buildClassToggles();
+    buildLegend();
+    document.getElementById("legend-hide").addEventListener("click", (e) => {
+      const content = document.getElementById("legend-content");
+      const hidden = content.style.display === "none";
+      content.style.display = hidden ? "block" : "none";
+      e.target.textContent = hidden ? "Hide" : "Show";
+    });
+    map.on("mousemove", updateHoverTooltip);
+    map.on("mouseout", hideHoverTooltip);
     map.on("load", () => {
       // 2026-08-21: globe view (per Taylor -- see
       // https://hazard.degreeday.org/?layer=wildfire for the reference
