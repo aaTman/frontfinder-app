@@ -163,10 +163,23 @@ def run_cycle(
     exceptional, occurrence on some firings. Likewise a failure in one
     model does not stop the others.
 
-    `latest.json` is written once per model, after all its steps for this
-    cycle have been attempted, listing only the steps that actually
-    succeeded -- a cycle that only got through step 0-48h before something
-    broke still publishes those, rather than nothing.
+    `latest.json` is written PROGRESSIVELY -- after each individual step
+    succeeds, not just once at the end of the whole cycle (2026-08-21 fix;
+    see the postmortem below). It always lists every step that has
+    succeeded so far, so a cycle that only got through step 0-48h before
+    something broke still publishes those, rather than nothing.
+
+    2026-08-21 postmortem: a full 00Z/12Z cycle fans out across 41 steps
+    (every 6h to 240h), each a full tiled-inference pass over the whole
+    grid -- that can take a long time. The original version only called
+    `_write_latest_pointer` once, after every step for a model had been
+    attempted, so the webapp showed "no published steps" (or a stale
+    pre-multi-step latest.json with no "steps" key at all, which the
+    frontend treats identically) for the ENTIRE run, even though earlier
+    steps had already finished and were sitting on disk. Confirmed live,
+    2026-08-21, against a real in-progress cycle. Writing the pointer after
+    every successful step means the slider gains steps in near-real-time as
+    the cycle progresses, instead of only appearing all at once at the end.
 
     Returns `{model_name: [store_path, ...]}` for whichever steps
     succeeded, in ascending step order; a model with zero successful steps
@@ -181,10 +194,8 @@ def run_cycle(
         manifest_name = run_config.manifest.name
         store_paths: list[str] = []
         step_entries: list[dict] = []
-        last_cycle: IFSCycle | None = None
         for step in steps:
             cycle = IFSCycle(date=cycle_date, run_hour=run_hour, step=step)
-            last_cycle = cycle
             try:
                 store_path = run_one_model(run_config, source, cycle, output_root)
             except Exception:
@@ -194,10 +205,12 @@ def run_cycle(
             step_entries.append(
                 {"step_hours": step, "valid_time": _valid_time(cycle), "store": _store_name(cycle)}
             )
+            # Publish as soon as this step lands, not after the whole cycle
+            # -- see the postmortem above.
+            _write_latest_pointer(output_root, manifest_name, cycle, step_entries)
 
         if store_paths:
             results[manifest_name] = store_paths
-            _write_latest_pointer(output_root, manifest_name, last_cycle, step_entries)
         else:
             logger.error("model %s produced zero successful steps for cycle %s-%02dZ", manifest_name, cycle_date, run_hour)
 

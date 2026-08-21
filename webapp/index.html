@@ -139,18 +139,11 @@
 
     const map = new maplibregl.Map({
       container: "map",
-      style: {
-        version: 8,
-        sources: {
-          basemap: {
-            type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256,
-            attribution: "© OpenStreetMap contributors",
-          },
-        },
-        layers: [{ id: "basemap", type: "raster", source: "basemap" }],
-      },
+      // Positron vector basemap via OpenFreeMap (self-hosted OSM data,
+      // no API key) -- per Taylor's reference,
+      // https://madewithmaplibre.com/basemaps/styles/openfreemap-positron.
+      // Swapped 2026-08-21 from the raw OSM raster tile style above/before.
+      style: "https://tiles.openfreemap.org/styles/positron",
       center: [-95, 40],
       zoom: 3,
     });
