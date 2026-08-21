@@ -160,24 +160,70 @@
     // time -- showStep() used to unconditionally clearLayers() + build 4
     // brand-new ZarrLayers on every call. Now each step's 4 layers are
     // built once (on first visit) and kept around; revisiting a step just
-    // flips opacity back to visible, which is instant. Layer ids are
+    // flips it back to visible, which is instant. Layer ids are
     // `fronts-${cls}-${stepIndex}` (index-qualified, since maplibre layer
     // ids must be unique and every step now stays resident on the map
     // instead of being removed) -- keyed in `layersByStep` by step index
     // rather than by class alone.
     //
-    // Tradeoff: scrubbing through an entire 41-step cycle keeps up to
-    // 41 * 4 = 164 WebGL layers/textures resident at once instead of the
-    // usual 4. Fine for this dataset's resolution/step count; revisit
-    // (e.g. an LRU cap that removeLayer()s the least-recently-shown step)
-    // if that ever becomes a real memory/perf problem.
+    // 2026-08-21, same day, follow-up fix: the first version of this cache
+    // hid a step by setting `layer.opacity = 0` instead of removing it --
+    // confirmed live that this made the page get progressively laggier and
+    // more inconsistent the more steps you'd visited. `opacity` is just a
+    // shader multiply inside customClassFrag (see that function) -- the
+    // layer still renders a full pass EVERY FRAME regardless of its value,
+    // so every previously-visited step was silently still costing GPU time
+    // forever, on top of whatever memory its textures held. The actual fix
+    // is the `visibility` layout property (`map.setLayoutProperty(id,
+    // "visibility", "none")`), which maplibre honors for any layer type
+    // including custom ones -- a hidden layer is skipped by the renderer
+    // entirely, not just made transparent. `layer.opacity` is now left
+    // fixed at 0.85 always; `visibility` alone controls what's actually
+    // drawn (see setStepVisibility below).
+    //
+    // Also added: an MRU cache with a small cap (MAX_CACHED_STEPS) so
+    // memory/texture count can't grow unbounded across a full 41-step
+    // cycle -- the least-recently-shown step's layers get removeLayer()'d
+    // (not just hidden) once the cap is exceeded.
     let currentStepIndex = -1;
-    const layersByStep = new Map(); // stepIndex -> Map(cls -> ZarrLayer)
+    const layersByStep = new Map(); // stepIndex -> Map(cls -> ZarrLayer); insertion order == LRU order (oldest first)
+    const MAX_CACHED_STEPS = 8;
     // Whether each class's checkbox is currently checked -- read when
-    // building or re-showing a step's layers, and mutated by the checkbox
-    // handler below. Separate from any single step's layers since it has
-    // to apply across every cached step, not just the one on screen.
+    // showing a step's layers, and mutated by the checkbox handler below.
+    // Separate from any single step's layers since it has to apply across
+    // every cached step, not just the one on screen.
     const classVisible = new Map(Object.keys(CLASS_STYLE).map((cls) => [cls, true]));
+
+    // Shows or hides every class layer belonging to `index` via the
+    // `visibility` layout property (see the big comment above for why
+    // this replaced toggling `opacity`). When showing, a class stays
+    // hidden anyway if its checkbox is currently unchecked.
+    function setStepVisibility(index, visible) {
+      const stepLayers = layersByStep.get(index);
+      if (!stepLayers) return;
+      for (const cls of stepLayers.keys()) {
+        const id = `fronts-${cls}-${index}`;
+        if (!map.getLayer(id)) continue;
+        const show = visible && classVisible.get(cls);
+        map.setLayoutProperty(id, "visibility", show ? "visible" : "none");
+      }
+    }
+
+    // Removes the least-recently-shown cached step(s) once the cache
+    // exceeds MAX_CACHED_STEPS -- `layersByStep`'s insertion order is kept
+    // as LRU order (showStep() re-inserts a step on every cache hit to
+    // move it to the MRU end), so the oldest entry is always first.
+    function evictOldCachedStepsIfNeeded() {
+      while (layersByStep.size > MAX_CACHED_STEPS) {
+        const oldestIndex = layersByStep.keys().next().value;
+        const oldestLayers = layersByStep.get(oldestIndex);
+        for (const cls of oldestLayers.keys()) {
+          const id = `fronts-${cls}-${oldestIndex}`;
+          if (map.getLayer(id)) map.removeLayer(id);
+        }
+        layersByStep.delete(oldestIndex);
+      }
+    }
 
     function setMeta(text, isError = false) {
       const el = document.getElementById("meta");
@@ -198,12 +244,10 @@
         `;
         row.querySelector("input").addEventListener("change", (e) => {
           classVisible.set(cls, e.target.checked);
-          // Only the currently-visible step's layer needs updating live --
-          // every other cached step reads classVisible itself the next
-          // time it's shown (see showStep below).
-          const stepLayers = layersByStep.get(currentStepIndex);
-          const layer = stepLayers && stepLayers.get(cls);
-          if (layer) layer.opacity = e.target.checked ? 0.85 : 0;
+          // Only the currently-visible step needs updating live -- every
+          // other cached step reads classVisible itself the next time
+          // it's shown (see showStep/setStepVisibility below).
+          setStepVisibility(currentStepIndex, true);
         });
         container.appendChild(row);
       }
@@ -265,17 +309,20 @@
       const step = activeSteps[index];
       if (!step) return;
 
-      // Hide (not remove) whatever step is currently showing -- if we've
-      // already built it, keeping it resident is what makes flipping back
-      // to it later instant.
-      if (currentStepIndex !== -1 && layersByStep.has(currentStepIndex)) {
-        for (const layer of layersByStep.get(currentStepIndex).values()) {
-          layer.opacity = 0;
-        }
+      // Hide (not remove) whatever step is currently showing, via
+      // `visibility` -- see the big comment on `layersByStep` above for
+      // why this is `visibility` and not `opacity`.
+      if (currentStepIndex !== -1) {
+        setStepVisibility(currentStepIndex, false);
       }
 
       let stepLayers = layersByStep.get(index);
-      if (!stepLayers) {
+      if (stepLayers) {
+        // Cache hit: re-insert to move this step to the MRU end of
+        // layersByStep's iteration order (see evictOldCachedStepsIfNeeded).
+        layersByStep.delete(index);
+        layersByStep.set(index, stepLayers);
+      } else {
         // First time this step has been shown this page load -- build its
         // 4 class layers once and cache them under `index`.
         stepLayers = new Map();
@@ -289,23 +336,21 @@
             // Two identical stops: customFrag (below) is what actually
             // varies alpha by probability, so the colormap texture itself
             // just needs to resolve to this class's solid color at every
-            // x-coordinate it's sampled at.
+            // x-coordinate it's sampled at. `opacity` is fixed and never
+            // toggled -- `visibility` (via setStepVisibility) is what
+            // actually shows/hides this layer.
             colormap: [style.color, style.color],
             customFrag: customClassFrag(cls),
-            opacity: classVisible.get(cls) ? 0.85 : 0,
+            opacity: 0.85,
           });
           map.addLayer(layer);
           stepLayers.set(cls, layer);
         }
         layersByStep.set(index, stepLayers);
-      } else {
-        // Already built -- just restore each layer's opacity to whatever
-        // its checkbox currently says, no network/GL work needed.
-        for (const [cls, layer] of stepLayers) {
-          layer.opacity = classVisible.get(cls) ? 0.85 : 0;
-        }
+        evictOldCachedStepsIfNeeded();
       }
       currentStepIndex = index;
+      setStepVisibility(index, true);
 
       document.getElementById("time-valid").textContent = step.valid_time;
       document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
