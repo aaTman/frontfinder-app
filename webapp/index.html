@@ -154,7 +154,30 @@
     // rather than round-tripping to latest.json each time.
     let activeSteps = []; // [{step_hours, valid_time, store}, ...] ascending
     let activeCycleTime = null;
-    const activeLayers = new Map(); // className -> ZarrLayer instance
+    // 2026-08-21: per-step layer cache, added because moving the slider
+    // back to an already-visited step was re-fetching/re-decoding every
+    // zarr chunk and rebuilding the GL layer from scratch every single
+    // time -- showStep() used to unconditionally clearLayers() + build 4
+    // brand-new ZarrLayers on every call. Now each step's 4 layers are
+    // built once (on first visit) and kept around; revisiting a step just
+    // flips opacity back to visible, which is instant. Layer ids are
+    // `fronts-${cls}-${stepIndex}` (index-qualified, since maplibre layer
+    // ids must be unique and every step now stays resident on the map
+    // instead of being removed) -- keyed in `layersByStep` by step index
+    // rather than by class alone.
+    //
+    // Tradeoff: scrubbing through an entire 41-step cycle keeps up to
+    // 41 * 4 = 164 WebGL layers/textures resident at once instead of the
+    // usual 4. Fine for this dataset's resolution/step count; revisit
+    // (e.g. an LRU cap that removeLayer()s the least-recently-shown step)
+    // if that ever becomes a real memory/perf problem.
+    let currentStepIndex = -1;
+    const layersByStep = new Map(); // stepIndex -> Map(cls -> ZarrLayer)
+    // Whether each class's checkbox is currently checked -- read when
+    // building or re-showing a step's layers, and mutated by the checkbox
+    // handler below. Separate from any single step's layers since it has
+    // to apply across every cached step, not just the one on screen.
+    const classVisible = new Map(Object.keys(CLASS_STYLE).map((cls) => [cls, true]));
 
     function setMeta(text, isError = false) {
       const el = document.getElementById("meta");
@@ -174,13 +197,13 @@
           ${style.label}
         `;
         row.querySelector("input").addEventListener("change", (e) => {
-          const layer = activeLayers.get(cls);
+          classVisible.set(cls, e.target.checked);
+          // Only the currently-visible step's layer needs updating live --
+          // every other cached step reads classVisible itself the next
+          // time it's shown (see showStep below).
+          const stepLayers = layersByStep.get(currentStepIndex);
+          const layer = stepLayers && stepLayers.get(cls);
           if (layer) layer.opacity = e.target.checked ? 0.85 : 0;
-          // zarr-layer doesn't expose a live opacity setter on all versions;
-          // fall back to remove/re-add if needed.
-          if (map.getLayer(`fronts-${cls}`)) {
-            map.setPaintProperty?.(`fronts-${cls}`, "raster-opacity", e.target.checked ? 0.85 : 0);
-          }
         });
         container.appendChild(row);
       }
@@ -216,21 +239,22 @@
       return { cycleTime: cycle_time, steps };
     }
 
-    function clearLayers() {
-      // 2026-08-21 fix: activeLayers is a Map, not a plain object --
-      // Object.keys(aMapInstance) always returns [] (a Map's entries
-      // aren't its own enumerable properties), so this loop never ran and
-      // old layers were never removed. showStep() would then try to
-      // map.addLayer() a new layer under the same id (e.g. "fronts-cold")
-      // that was still present from the previous step, which throws --
-      // confirmed live: this silently broke every slider move after the
-      // first (the initial T+0 load has nothing to clear, so it always
-      // looked fine until you actually dragged the slider). Map.keys() is
-      // the fix.
-      for (const cls of activeLayers.keys()) {
-        if (map.getLayer(`fronts-${cls}`)) map.removeLayer(`fronts-${cls}`);
+    // Removes every cached layer for every step, and forgets the cache --
+    // only needed when the underlying data source changes out from under
+    // it (a model switch), since otherwise a "cold" step's old zarr store
+    // path would stay resident under a new model's cache entry. Not called
+    // by showStep()/the slider anymore -- see the 2026-08-21 comment on
+    // `layersByStep` above for why moving between already-built steps no
+    // longer removes anything.
+    function clearAllCachedLayers() {
+      for (const [index, stepLayers] of layersByStep) {
+        for (const cls of stepLayers.keys()) {
+          const id = `fronts-${cls}-${index}`;
+          if (map.getLayer(id)) map.removeLayer(id);
+        }
       }
-      activeLayers.clear();
+      layersByStep.clear();
+      currentStepIndex = -1;
     }
 
     function formatLeadHours(h) {
@@ -240,25 +264,49 @@
     function showStep(index) {
       const step = activeSteps[index];
       if (!step) return;
-      const storePath = absoluteStorePath(activeModel, step.store);
-      clearLayers();
-      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
-        const layer = new ZarrLayer({
-          id: `fronts-${cls}`,
-          source: storePath,
-          variable: cls,
-          clim: [0, 1],
-          // Two identical stops: customFrag (below) is what actually
-          // varies alpha by probability, so the colormap texture itself
-          // just needs to resolve to this class's solid color at every
-          // x-coordinate it's sampled at.
-          colormap: [style.color, style.color],
-          customFrag: customClassFrag(cls),
-          opacity: 0.85,
-        });
-        map.addLayer(layer);
-        activeLayers.set(cls, layer);
+
+      // Hide (not remove) whatever step is currently showing -- if we've
+      // already built it, keeping it resident is what makes flipping back
+      // to it later instant.
+      if (currentStepIndex !== -1 && layersByStep.has(currentStepIndex)) {
+        for (const layer of layersByStep.get(currentStepIndex).values()) {
+          layer.opacity = 0;
+        }
       }
+
+      let stepLayers = layersByStep.get(index);
+      if (!stepLayers) {
+        // First time this step has been shown this page load -- build its
+        // 4 class layers once and cache them under `index`.
+        stepLayers = new Map();
+        const storePath = absoluteStorePath(activeModel, step.store);
+        for (const [cls, style] of Object.entries(CLASS_STYLE)) {
+          const layer = new ZarrLayer({
+            id: `fronts-${cls}-${index}`,
+            source: storePath,
+            variable: cls,
+            clim: [0, 1],
+            // Two identical stops: customFrag (below) is what actually
+            // varies alpha by probability, so the colormap texture itself
+            // just needs to resolve to this class's solid color at every
+            // x-coordinate it's sampled at.
+            colormap: [style.color, style.color],
+            customFrag: customClassFrag(cls),
+            opacity: classVisible.get(cls) ? 0.85 : 0,
+          });
+          map.addLayer(layer);
+          stepLayers.set(cls, layer);
+        }
+        layersByStep.set(index, stepLayers);
+      } else {
+        // Already built -- just restore each layer's opacity to whatever
+        // its checkbox currently says, no network/GL work needed.
+        for (const [cls, layer] of stepLayers) {
+          layer.opacity = classVisible.get(cls) ? 0.85 : 0;
+        }
+      }
+      currentStepIndex = index;
+
       document.getElementById("time-valid").textContent = step.valid_time;
       document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
       setMeta(`${MODELS[activeModel].label} · cycle ${activeCycleTime}`);
@@ -284,6 +332,12 @@
     }
 
     async function loadModel(model) {
+      // A model switch invalidates every cached step -- different model
+      // means different zarr store paths, so nothing in layersByStep is
+      // reusable across this call. (Currently unreachable in the UI since
+      // there's only one enabled model -- see the panel's HTML comment --
+      // but loadModel() is written to support more than one.)
+      clearAllCachedLayers();
       activeModel = model;
       setMeta("loading…");
       try {
