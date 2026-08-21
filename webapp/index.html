@@ -124,7 +124,7 @@
     // Number of discrete probability bands for the filled-contour look
     // below -- shared so the legend/panel could reference it later if we
     // ever want to show the band thresholds there.
-    const N_CONTOUR_BANDS = 5;
+    const N_CONTOUR_BANDS = 6;
 
     function customClassFrag(cls) {
       // `cls` becomes the GLSL identifier for this band's decoded value
@@ -134,17 +134,27 @@
       //
       // 2026-08-21: swapped from a smooth alpha gradient (alpha == the raw
       // rescaled probability, so it faded continuously from transparent to
-      // opaque) to filled contour bands, per Taylor -- quantize `rescaled`
-      // into N_CONTOUR_BANDS discrete steps and use a stepped opacity per
-      // band instead of a continuous one. The lowest band (probability
-      // roughly < 1/N_CONTOUR_BANDS) is discarded entirely rather than
-      // drawn at low opacity, so it reads as "not a front" instead of a
-      // faint haze -- much closer to how a topo map's lowest contour
-      // interval is left unfilled. Since `colormap` is still just two
+      // opaque) to filled contour bands, per Taylor.
+      //
+      // Same day, follow-up: the first version (5 bands, discard the
+      // bottom 1/5, evenly-spaced opacity 0.4/0.6/0.8/1.0) was confirmed
+      // live to actually be banded (checked with a zoomed screenshot --
+      // real hard-edged grid cells, not a shader/deploy bug), but Taylor
+      // still read it as "the exact same color mesh, only more filtered"
+      // and called out lingering low-opacity haze. Two things made 5 tight
+      // bands of one hue hard to perceive as discrete: the opacity steps
+      // were only 0.2 apart (0.4 vs 0.6 barely reads as different at a
+      // glance), and the lowest surviving band (bottom 1/5 discarded,
+      // second-from-bottom band still shown at ~0.29 effective opacity)
+      // was itself faint enough to look like haze rather than a real
+      // contour interval. Fixed by discarding the bottom HALF of the
+      // range instead of just the bottom quarter, and using a much wider,
+      // non-linear opacity spread (0.55 / 0.75 / 1.0) across the 3
+      // remaining bands instead of an even ramp -- fewer, bolder,
+      // more-separated steps. Since `colormap` is still just two
       // identical hex stops (see the comment above CLASS_STYLE), `c.rgb`
       // is already a flat, single hue regardless of `rescaled` -- only
-      // opacity carries the banding, which is what produces the visible
-      // hard edges between bands rather than a smooth fill.
+      // opacity carries the banding.
       return `
         if (isnan(${cls}_tex) || isnan(${cls})) {
           discard;
@@ -153,10 +163,15 @@
 
         float nBands = ${N_CONTOUR_BANDS.toFixed(1)};
         float band = min(floor(rescaled * nBands), nBands - 1.0);
-        if (band < 1.0) {
-          discard; // lowest band = "not a front" -- leave unfilled
+        float discardBelow = nBands / 2.0; // bottom half of the range = "not a front"
+        if (band < discardBelow) {
+          discard;
         }
-        float bandOpacity = (band + 1.0) / nBands; // stepped, e.g. 0.4/0.6/0.8/1.0 for 5 bands
+        // Wide, non-linear steps (not an even ramp) across the 3 bands
+        // that survive the discard, so they read as clearly separate
+        // intervals instead of a near-continuous fade.
+        float visibleBand = band - discardBelow; // 0, 1, or 2
+        float bandOpacity = visibleBand < 1.0 ? 0.55 : (visibleBand < 2.0 ? 0.75 : 1.0);
 
         vec4 c = texture(colormap, vec2(rescaled, 0.5));
         gl_FragColor = vec4(c.rgb, opacity * bandOpacity);
