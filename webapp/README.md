@@ -97,6 +97,28 @@ versions rather than assume: v4.7.1 has no `setProjection` method or
 `ProjectionSpecification` type at all; v5.24.0 has both. There's no
 `projection` field in the `Map` constructor's `MapOptions` in either
 version -- `setProjection()` after construction is the only way in.
+
+**First deploy broke the page entirely** -- confirmed live, 2026-08-21:
+calling `map.setProjection(...)` immediately after `new maplibregl.Map(...)`
+(before the style finishes loading) throws synchronously:
+`Error: Style is not done loading.` Since that was an uncaught exception at
+module top level, it aborted the REST of the script too -- not just the
+globe switch failed silently, `map.on("load", ...)` never even got
+registered, so the page sat on "loading..." forever with the panel/
+checkboxes rendering (they ran before the throw) but nothing else ever
+happening. Fixed by moving `setProjection` inside the `"load"` event
+handler, right before `loadModel()`.
+
+## Globe projection + maplibre-gl v5 (2026-08-21)
+
+Switched to a globe view via `map.setProjection({type: "globe"})`, per
+Taylor's reference (https://hazard.degreeday.org/?layer=wildfire). This
+required bumping the import map's `maplibre-gl` pin from v4 to v5 --
+checked the real, installed npm package's `dist/maplibre-gl.d.ts` for both
+versions rather than assume: v4.7.1 has no `setProjection` method or
+`ProjectionSpecification` type at all; v5.24.0 has both. There's no
+`projection` field in the `Map` constructor's `MapOptions` in either
+version -- `setProjection()` after construction is the only way in.
 Not yet checked live in a browser (this was implemented alongside the
 multi-step backend work in the same sandbox session, and the frontend
 verification loop that caught the two bugs above hasn't been re-run against

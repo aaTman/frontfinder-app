@@ -154,13 +154,6 @@
       center: [-95, 40],
       zoom: 3,
     });
-    // 2026-08-21: globe view (per Taylor -- see
-    // https://hazard.degreeday.org/?layer=wildfire for the reference look).
-    // There's no `projection` constructor option in maplibre-gl's
-    // `MapOptions` (checked the real v5.24.0 dist/maplibre-gl.d.ts) --
-    // `setProjection` is the documented way to switch it after construction.
-    map.setProjection({ type: "globe" });
-
     let activeModel = "best_loss";
     // The full step list for the currently-loaded cycle (see
     // resolveLatestRun below) -- fetched once per model load, not
@@ -303,7 +296,21 @@
     }
 
     buildClassToggles();
-    map.on("load", () => loadModel(activeModel));
+    map.on("load", () => {
+      // 2026-08-21: globe view (per Taylor -- see
+      // https://hazard.degreeday.org/?layer=wildfire for the reference
+      // look). `setProjection` throws synchronously
+      // ("Error: Style is not done loading") if called before the style
+      // finishes loading -- confirmed live: calling it right after `new
+      // maplibregl.Map(...)` threw an uncaught exception at module scope,
+      // which aborted the REST of the script too (buildClassToggles() ran
+      // fine since it's before this line, but map.on("load", ...) itself
+      // never even got registered) -- so the page silently never loaded
+      // any data at all, not just "no globe". Calling it inside the
+      // "load" event handler is the fix.
+      map.setProjection({ type: "globe" });
+      loadModel(activeModel);
+    });
   </script>
 </body>
 </html>
