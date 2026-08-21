@@ -1,6 +1,9 @@
 """CLI entrypoint invoked by the systemd timer on the Proxmox VM. Determines
 the most recent completed IFS synoptic cycle from the current UTC time,
-loads the active Keras model(s), and runs `run_cycle` for each.
+loads the active Keras model(s), and runs `run_cycle` for each -- which, as
+of 2026-08-21, means every published forecast step for that cycle (every 6h
+out to 240h, capped at 90h for 06Z/18Z cycles -- see
+ecmwf_ifs.target_steps_for_cycle), not just a single step=0 run.
 
 Not covered by unit tests (loads real Keras models + hits real network) --
 `run_cycle.run_cycle`/`run_one_model` carry the tested logic; this module is
@@ -26,7 +29,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from frontfinder.config.manifests import BEST_LOSS_MANIFEST  # , MODEL_1702_MANIFEST -- see module docstring
-from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, IFSCycle
+from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource
 from frontfinder.inference.engine import KerasPredictor
 from frontfinder.scheduler.retention import prune_old_cache_files, prune_old_output_stores
 from frontfinder.scheduler.run_cycle import ModelRunConfig, run_cycle
@@ -34,18 +37,24 @@ from frontfinder.scheduler.run_cycle import ModelRunConfig, run_cycle
 SYNOPTIC_HOURS = (0, 6, 12, 18)
 
 
-def most_recent_completed_cycle(now: datetime, publish_lag_hours: int = 7) -> IFSCycle:
-    """The most recent synoptic cycle whose IFS open-data files should
-    already be published, given ECMWF's typical ~6-8h publish lag after
-    the nominal cycle time. `publish_lag_hours` is a first-pass estimate --
-    tune it against actual observed availability on the Proxmox VM; if runs
-    start failing with "file not found" on the ECMWF side, increase it
-    rather than assume the pipeline is broken.
+def most_recent_completed_cycle(now: datetime, publish_lag_hours: int = 7) -> tuple[str, int]:
+    """The most recent synoptic cycle (date, run_hour) whose IFS open-data
+    files should already be published, given ECMWF's typical ~6-8h publish
+    lag after the nominal cycle time. `publish_lag_hours` is a first-pass
+    estimate -- tune it against actual observed availability on the Proxmox
+    VM; if runs start failing with "file not found" on the ECMWF side,
+    increase it rather than assume the pipeline is broken.
+
+    2026-08-21: used to return a full `IFSCycle` (always step=0) back when
+    every run only ever fetched the analysis-equivalent field. Now that
+    `run_cycle` fans out across every published step itself (see
+    ecmwf_ifs.target_steps_for_cycle), this only needs to pick WHICH cycle
+    -- the step loop lives entirely inside run_cycle.
     """
     candidate = now - timedelta(hours=publish_lag_hours)
     cycle_hour = max(h for h in SYNOPTIC_HOURS if h <= candidate.hour)
     cycle_dt = candidate.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
-    return IFSCycle(date=cycle_dt.strftime("%Y-%m-%d"), run_hour=cycle_hour)
+    return cycle_dt.strftime("%Y-%m-%d"), cycle_hour
 
 
 def build_run_configs(model_dir: str) -> list[ModelRunConfig]:
@@ -93,12 +102,15 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logger = logging.getLogger(__name__)
 
-    cycle = most_recent_completed_cycle(datetime.now(timezone.utc), args.publish_lag_hours)
+    cycle_date, run_hour = most_recent_completed_cycle(datetime.now(timezone.utc), args.publish_lag_hours)
     source = EcmwfOpenDataSource(cache_dir=args.cache_dir, source=args.ifs_source)
     run_configs = build_run_configs(args.model_dir)
 
-    results = run_cycle(run_configs, source, cycle, args.output_root)
-    logger.info("cycle %s complete: %s", cycle, list(results))
+    results = run_cycle(run_configs, source, cycle_date, run_hour, args.output_root)
+    logger.info(
+        "cycle %s-%02dZ complete: %s",
+        cycle_date, run_hour, {name: len(paths) for name, paths in results.items()},
+    )
 
     # Retention runs regardless of whether this cycle's run_cycle() fully
     # succeeded -- a failed model run shouldn't also block disk cleanup, and

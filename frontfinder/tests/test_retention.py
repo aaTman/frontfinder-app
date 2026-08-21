@@ -133,3 +133,39 @@ def test_prune_old_cache_files_handles_missing_cache_dir(tmp_path):
     missing = os.path.join(str(tmp_path), "does_not_exist")
     assert prune_old_cache_files(missing, max_age_days=10, now=NOW) == []
 
+
+def test_prune_old_output_stores_recognizes_step_suffixed_names(tmp_path):
+    # 2026-08-21: store names now carry a "_f<NNN>" step suffix (multi-step
+    # forecast product) -- this must be recognized as a valid, prunable name
+    # just like the old step-less shape, not skipped as "unrecognized".
+    root = str(tmp_path)
+    old = _touch_store(root, "best_loss", "2026-08-01T00Z_f006.zarr")  # 20 days old
+    new = _touch_store(root, "best_loss", "2026-08-20T18Z_f240.zarr")  # 1 day old
+
+    deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
+
+    assert deleted == [old]
+    assert not os.path.exists(old)
+    assert os.path.exists(new)
+
+
+def test_prune_old_output_stores_still_recognizes_pre_multi_step_names(tmp_path):
+    # legacy stores written before 2026-08-21 have no step suffix at all --
+    # must still be prunable, not orphaned forever as "unrecognized".
+    root = str(tmp_path)
+    old = _touch_store(root, "best_loss", "2026-08-01T00Z.zarr")
+
+    deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
+
+    assert deleted == [old]
+
+
+def test_prune_old_cache_files_handles_step_suffixed_naming(tmp_path):
+    cache_dir = str(tmp_path)
+    old = _touch_grib(cache_dir, "2026-08-01_18z_f006_t_1000.grib2")
+    new = _touch_grib(cache_dir, "2026-08-20_18z_f240_t_1000.grib2")
+
+    deleted = prune_old_cache_files(cache_dir, max_age_days=10, now=NOW)
+
+    assert deleted == [old]
+    assert os.path.exists(new)

@@ -34,6 +34,81 @@ an added variable), Keras will raise a shape mismatch the moment
 channels again -- `scripts/diagnose_model_saturation.py` exercises this
 directly and is the fastest way to surface that.
 
+## Multi-step forecast product (2026-08-21)
+
+The pipeline used to fetch and predict on exactly one time per cycle --
+`IFSCycle.step` defaulted to 0 (the cycle's own analysis-equivalent field)
+and nothing ever overrode it, so there was never more than one time slice
+to look at. Taylor's call once the webapp had no time slider to show:
+extend to a real forecast product, every 6 hours out to 240 hours.
+
+What actually publishes governs what gets produced -- confirmed against
+ECMWF's own open-data docs, 2026-08-21
+(https://confluence.ecmwf.int/display/DAC/ECMWF+open+data:+real-time+forecasts+from+IFS+and+AIFS):
+**00Z/12Z cycles publish the full 240h range** (3-hourly to 144h, 6-hourly
+beyond), so they get all 41 requested steps (0, 6, ..., 240).
+**06Z/18Z cycles publish only to 90h**, period -- no extended range exists
+for them at all, so those cycles cap out at 16 steps (0, 6, ..., 90). This
+is a real, permanent ECMWF publishing asymmetry, not a pipeline
+limitation -- see `ecmwf_ifs.available_forecast_steps` /
+`target_steps_for_cycle`.
+
+Design, and where it lives:
+- `frontfinder/ingest/ecmwf_ifs.py`: `SIX_HOURLY_STEPS_TO_240H`, the
+  per-run-hour publish ceiling (`available_forecast_steps`), and their
+  intersection (`target_steps_for_cycle`). Also fixed a latent cache-
+  collision bug in `_fetch_grib`'s target filename -- it never used to
+  include `cycle.step`, so two different steps of the same cycle/param/level
+  would have silently overwritten the same GRIB cache file (harmless while
+  every request was step=0; would have served the wrong lead time's data
+  the moment step started varying).
+- `frontfinder/scheduler/run_cycle.py`: `run_cycle` now fans out across
+  every step `target_steps_for_cycle` returns for that run hour (or an
+  explicit `steps=` override), running each model end-to-end per step. One
+  zarr store per (cycle, step) -- same flat 2D-per-store architecture as
+  before, just one store per lead time instead of one per cycle. A step
+  that fails (e.g. the longest lead times not published YET at the moment
+  the timer fires) is logged and skipped, not treated as fatal to the rest
+  of the cycle -- ECMWF publishes progressively, so this is an expected
+  occurrence on some firings, not a bug. `latest.json` is written once per
+  model, after every step's been attempted, listing only the steps that
+  actually succeeded:
+  ```json
+  {"cycle_time": "2026-08-21T12:00:00",
+   "steps": [{"step_hours": 0, "valid_time": "2026-08-21T12:00:00", "store": "2026-08-21T12Z_f000.zarr"},
+             {"step_hours": 6, "valid_time": "2026-08-21T18:00:00", "store": "2026-08-21T12Z_f006.zarr"}, ...]}
+  ```
+  (replaces the old flat `{store, cycle_time}` shape).
+- `frontfinder/scheduler/retention.py`: store-name regex now accepts the
+  `_f<NNN>` step suffix (`2026-08-20T18Z_f006.zarr`), while still
+  recognizing pre-2026-08-21 step-less names so anything already on disk
+  eventually gets pruned too rather than orphaned as "unrecognized" forever.
+- `webapp/index.html`: reads the `steps` array and adds a time slider
+  (`#time-control`) -- hidden when a cycle has 1 published step (e.g. a
+  06Z/18Z run that's only gotten through T+0 so far), shown otherwise.
+  Dragging it swaps which store each `ZarrLayer` points at without
+  re-fetching `latest.json`, since the full step list is fetched once per
+  model load. Also switched to a **globe projection**
+  (`map.setProjection({type: "globe"})`, per the reference look at
+  https://hazard.degreeday.org/?layer=wildfire) -- this needed bumping
+  `maplibre-gl` from v4 to v5 in the import map; v4 has no `setProjection`/
+  `ProjectionSpecification` at all (checked the real, installed package's
+  `dist/maplibre-gl.d.ts` for both versions rather than assume).
+
+**Not yet smoke-tested live** -- this sandbox has no network access to IFS
+open-data, so `target_steps_for_cycle`'s ceiling numbers are taken from
+ECMWF's documentation, not exercised against a real multi-step fetch.
+Before trusting this unattended: run one real cycle on mandelhub (ideally a
+00Z or 12Z one, to exercise the full 41-step path) and check (1) it
+actually completes within the systemd unit's `TimeoutStartSec=3h`, (2) how
+long it actually takes end-to-end (extrapolate from the ~17s/step,
+~2GB-peak single-step numbers in the "done" postmortem below -- 41 steps x
+17s is only ~12 minutes of inference, but IFS download time for 41 steps'
+worth of GRIB fields, not previously measured, could dominate), and
+(3) real per-model disk usage per cycle now that it's ~41 stores instead of
+1 -- worth re-checking whether the existing `--retention-days 10` window is
+still the right tradeoff at roughly 40x the store count.
+
 ## Architecture decision log (read this first)
 
 Before any code was written, mandelhub's spec (i7-4770, 4c/8t, 16GB->32GB
@@ -106,7 +181,7 @@ uv run python -m frontfinder.scheduler.cli --model-dir ... --output-root ...
 ">=3.11"` is set by `topozarr==0.0.4`'s own requirement, not an arbitrary
 choice -- `uv lock` caught this when it was first set to `>=3.10`.
 
-87 tests (86 run + 1 skipped in this sandbox, needs real TensorFlow), all
+102 tests (101 run + 1 skipped in this sandbox, needs real TensorFlow), all
 green, `uv run --group dev pytest -q` from this directory. TDD was used
 throughout: tiling, the derived-variable formulas, manifest validation, and
 the full assembly/inference/pyramid/scheduler chain are all exercised
@@ -227,3 +302,7 @@ window once you see real disk usage.
 6. Model weight files (`_best_loss.keras`, `model_1702.h5`) need to actually
    land on the Proxmox VM at the path `scheduler/cli.py --model-dir` points
    to -- not included in this repo.
+7. **Smoke-test the multi-step forecast product live.** See "Multi-step
+   forecast product (2026-08-21)" above -- not yet exercised against a real
+   IFS open-data fetch (no network access in this sandbox), and disk/runtime
+   impact of ~41 stores/cycle instead of 1 hasn't been measured for real.

@@ -24,10 +24,17 @@ from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# "2026-08-20T18Z.zarr" -> 2026-08-20 (output store directories, see run_cycle.py's store_name)
-_STORE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T\d{2}Z\.zarr$")
-# "2026-08-20_18z_t_1000.grib2" -> 2026-08-20 (GRIB cache files, see
-# EcmwfOpenDataSource._fetch_grib's target naming)
+# "2026-08-20T18Z_f006.zarr" -> 2026-08-20 (output store directories, see
+# run_cycle.py's _store_name). The `_f<NNN>` step suffix is optional in this
+# pattern so that pre-2026-08-21 stores (written before the multi-step
+# forecast product existed, one store per cycle rather than one per
+# cycle+step) are still recognized and eventually pruned rather than
+# silently orphaned as "unrecognized" forever.
+_STORE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T\d{2}Z(?:_f\d{3})?\.zarr$")
+# "2026-08-20_18z_f006_t_1000.grib2" -> 2026-08-20 (GRIB cache files, see
+# EcmwfOpenDataSource._fetch_grib's target naming -- the `_f<NNN>` step
+# segment was added 2026-08-21 alongside the multi-step forecast product,
+# but the wildcard here already covered it with no regex change needed).
 _CACHE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_\d{2}z_.*\.grib2$")
 
 

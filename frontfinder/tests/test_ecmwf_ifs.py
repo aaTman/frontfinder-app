@@ -4,10 +4,13 @@ import xarray as xr
 
 from frontfinder.config.manifests import BEST_LOSS_MANIFEST, MODEL_1702_MANIFEST
 from frontfinder.ingest.ecmwf_ifs import (
+    SIX_HOURLY_STEPS_TO_240H,
     EcmwfOpenDataSource,
     FakeIFSFieldSource,
     IFSCycle,
     assemble_model_input,
+    available_forecast_steps,
+    target_steps_for_cycle,
 )
 
 
@@ -194,3 +197,51 @@ def test_fetch_pressure_level_caches_by_variable_level_and_cycle(tmp_path, monke
 
     assert calls == [("t", (850,))]
 
+
+def test_available_forecast_steps_00z_12z_go_to_240h_with_coarsening_at_150h():
+    for run_hour in (0, 12):
+        steps = available_forecast_steps(run_hour)
+        assert steps[0] == 0
+        assert steps[-1] == 240
+        # 3-hourly through 144h...
+        assert 3 in steps and 141 in steps and 144 in steps
+        # ...then 6-hourly only beyond 144h -- 147 was never published.
+        assert 147 not in steps
+        assert 150 in steps and 156 in steps
+
+
+def test_available_forecast_steps_06z_18z_cap_at_90h():
+    for run_hour in (6, 18):
+        steps = available_forecast_steps(run_hour)
+        assert steps[0] == 0
+        assert steps[-1] == 90
+        assert 240 not in steps
+        assert 96 not in steps  # would be the next 3-hourly step past the cap
+
+
+def test_available_forecast_steps_rejects_bad_run_hour():
+    with pytest.raises(ValueError):
+        available_forecast_steps(9)
+
+
+def test_target_steps_for_cycle_00z_12z_get_the_full_41_step_6_hourly_grid():
+    for run_hour in (0, 12):
+        steps = target_steps_for_cycle(run_hour)
+        assert steps == SIX_HOURLY_STEPS_TO_240H
+        assert len(steps) == 41
+        assert steps[-1] == 240
+
+
+def test_target_steps_for_cycle_06z_18z_are_capped_at_90h():
+    for run_hour in (6, 18):
+        steps = target_steps_for_cycle(run_hour)
+        assert steps == tuple(range(0, 91, 6))
+        assert len(steps) == 16
+        assert steps[-1] == 90
+        assert 240 not in steps
+
+
+def test_target_steps_for_cycle_respects_a_smaller_desired_grid():
+    # sanity check that this doesn't hardcode the 41-step default internally
+    steps = target_steps_for_cycle(0, desired=(0, 6, 999))
+    assert steps == (0, 6)  # 999 isn't published at any run hour

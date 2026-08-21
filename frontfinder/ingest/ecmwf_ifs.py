@@ -71,6 +71,43 @@ class IFSCycle:
         datetime.strptime(self.date, "%Y-%m-%d")
 
 
+# Desired lead-time grid for the "every 6 hours out to 240 hours" forecast
+# product (Taylor's call, 2026-08-21): 0, 6, 12, ..., 240 -- 41 steps.
+SIX_HOURLY_STEPS_TO_240H: tuple[int, ...] = tuple(range(0, 241, 6))
+
+
+def available_forecast_steps(run_hour: int) -> tuple[int, ...]:
+    """Which forecast lead times (hours) IFS open-data's 0.25deg "oper" HRES
+    stream actually publishes for a given cycle run hour.
+
+    Confirmed against ECMWF's own open-data documentation (2026-08-21,
+    https://confluence.ecmwf.int/display/DAC/ECMWF+open+data:+real-time+forecasts+from+IFS+and+AIFS):
+    00Z/12Z cycles publish 0-144h at 3h steps, then 150-240h at 6h steps.
+    06Z/18Z cycles publish ONLY 0-90h at 3h steps -- there is no extended
+    range at all for the off-synoptic cycles. This is a real, permanent
+    asymmetry in what ECMWF publishes, not a pipeline limitation to work
+    around: `target_steps_for_cycle` below intersects the desired 6-hourly
+    grid against this per-run-hour ceiling rather than requesting steps
+    that will 404.
+    """
+    if run_hour in (0, 12):
+        return tuple(range(0, 145, 3)) + tuple(range(150, 241, 6))
+    if run_hour in (6, 18):
+        return tuple(range(0, 91, 3))
+    raise ValueError(f"run_hour must be one of 0/6/12/18, got {run_hour}")
+
+
+def target_steps_for_cycle(
+    run_hour: int, desired: tuple[int, ...] = SIX_HOURLY_STEPS_TO_240H
+) -> tuple[int, ...]:
+    """The subset of `desired` (default: every 6h to 240h) that this cycle's
+    run hour actually publishes. For 00Z/12Z this is the full 41-step grid
+    (every multiple of 6 up to 240h is a subset of what's published); for
+    06Z/18Z it's capped at 90h -- 16 steps (0, 6, ..., 90), never 240h."""
+    published = set(available_forecast_steps(run_hour))
+    return tuple(s for s in desired if s in published)
+
+
 class IFSFieldSource(Protocol):
     """Anything that can hand back IFS fields on the global 0.25deg grid."""
 
@@ -197,9 +234,19 @@ class EcmwfOpenDataSource:
         import xarray as xr
 
         key = (param, tuple(levelist or ()), cycle.date, cycle.run_hour, cycle.step)
+        # 2026-08-21: the target filename didn't used to include cycle.step
+        # at all, which was a latent cache-collision bug -- harmless while
+        # every request was step=0, but the moment the pipeline started
+        # fetching multiple lead times per cycle (see
+        # scheduler/run_cycle.py's multi-step orchestration), two different
+        # steps of the same cycle/param/levelist would silently overwrite
+        # the same cache file on disk, so whichever step wasn't fetched
+        # first would end up serving the WRONG lead time's data through a
+        # stale cache hit rather than actually fetching. Caught while
+        # scoping the multi-step feature, before it ever ran live.
         target = os.path.join(
             self._cache_dir,
-            f"{cycle.date}_{cycle.run_hour:02d}z_{param}_{'-'.join(map(str, levelist or []))}.grib2",
+            f"{cycle.date}_{cycle.run_hour:02d}z_f{cycle.step:03d}_{param}_{'-'.join(map(str, levelist or []))}.grib2",
         )
         if not os.path.exists(target):
             request = dict(

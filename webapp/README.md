@@ -8,12 +8,27 @@ on the mandelhub Proxmox VM (see `deploy/Caddyfile`).
 
 `ZARR_ROOT` (`/data` by default) is expected to be reverse-proxied by Caddy
 to the same directory the scheduler (`frontfinder.scheduler.run_cycle`)
-writes into: `<output_root>/<model>/<cycle>.zarr` plus a
+writes into: `<output_root>/<model>/<cycle>_f<step>.zarr` plus a
 `<output_root>/<model>/latest.json` pointer file written after each
 successful run. The frontend fetches `latest.json` for whichever model is
 selected, rather than trying to list the zarr directory or guess the most
 recent cycle -- this also means a failed model run for one cycle just leaves
 the previous `latest.json` in place instead of showing a broken/partial map.
+
+**2026-08-21: `latest.json` now lists every published forecast step for the
+current cycle**, not just one store -- see the "Multi-step forecast
+product" section in the top-level README for the full design (every 6h out
+to 240h, capped at 90h for 06Z/18Z cycles). Shape:
+```json
+{"cycle_time": "2026-08-21T12:00:00",
+ "steps": [{"step_hours": 0, "valid_time": "2026-08-21T12:00:00", "store": "2026-08-21T12Z_f000.zarr"}, ...]}
+```
+`resolveLatestRun()` fetches this once per model load and caches the full
+`steps` array in memory (`activeSteps`) -- the time slider (`#time-control`)
+just indexes into it, so dragging it doesn't re-fetch `latest.json` on every
+move. The slider is hidden when a cycle only has one published step so far
+(e.g. a 06Z/18Z run, or a 00Z/12Z run the timer caught mid-publish before
+its longer lead times were available).
 
 ## Known API-version caveat (read before touching colors)
 
@@ -71,3 +86,18 @@ system, so the checkbox handler's `map.setPaintProperty?.(...,
 dead code -- `ZarrLayer`'s own per-instance `.opacity` setter, used in the
 same handler, is what actually works). Worth cleaning up the dead
 `setPaintProperty` branch next time this file is touched.
+
+## Globe projection + maplibre-gl v5 (2026-08-21)
+
+Switched to a globe view via `map.setProjection({type: "globe"})`, per
+Taylor's reference (https://hazard.degreeday.org/?layer=wildfire). This
+required bumping the import map's `maplibre-gl` pin from v4 to v5 --
+checked the real, installed npm package's `dist/maplibre-gl.d.ts` for both
+versions rather than assume: v4.7.1 has no `setProjection` method or
+`ProjectionSpecification` type at all; v5.24.0 has both. There's no
+`projection` field in the `Map` constructor's `MapOptions` in either
+version -- `setProjection()` after construction is the only way in.
+Not yet checked live in a browser (this was implemented alongside the
+multi-step backend work in the same sandbox session, and the frontend
+verification loop that caught the two bugs above hasn't been re-run against
+this specific change) -- do that before considering this done.

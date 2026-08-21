@@ -4,14 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Fronts — ESPR</title>
-  <link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet" />
+  <!-- v5, not v4: globe projection (map.setProjection below) doesn't exist
+       in maplibre-gl@4 at all -- confirmed against the real v4.7.1
+       dist/maplibre-gl.d.ts (no `setProjection`/`ProjectionSpecification`)
+       vs v5.24.0's, which has both. Bumped 2026-08-21 alongside adding the
+       globe view. -->
+  <link href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet" />
   <style>
     html, body, #map { height: 100%; margin: 0; background: #0b0e14; }
     #panel {
       position: absolute; top: 12px; left: 12px; z-index: 10;
       background: rgba(15, 18, 26, 0.88); color: #e6e8ee;
       font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      border-radius: 10px; padding: 12px 14px; min-width: 220px;
+      border-radius: 10px; padding: 12px 14px; min-width: 240px;
       box-shadow: 0 4px 18px rgba(0,0,0,0.35);
     }
     #panel h1 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
@@ -28,6 +33,13 @@
     .class-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
     .class-row input[type="checkbox"] { accent-color: #3d6bff; }
     .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    #time-control {
+      margin-top: 10px; border-top: 1px solid #2a2f3d; padding-top: 10px;
+      display: none; /* shown once a run with >1 step is loaded */
+    }
+    #time-control input[type="range"] { width: 100%; accent-color: #3d6bff; }
+    #time-label { font-size: 12px; display: flex; justify-content: space-between; }
+    #time-label .lead { color: #8b90a0; }
     #meta { margin-top: 10px; font-size: 11px; color: #8b90a0; border-top: 1px solid #2a2f3d; padding-top: 8px; }
     #meta.error { color: #ff8080; }
   </style>
@@ -41,13 +53,17 @@
          its trained 950/900hPa levels aren't published by IFS open-data).
          Re-add a toggle here once it's back; single-model display until then. -->
     <div id="class-toggles"></div>
+    <div id="time-control">
+      <div id="time-label"><span id="time-valid">--</span><span class="lead" id="time-lead">--</span></div>
+      <input type="range" id="time-slider" min="0" max="0" value="0" step="1" />
+    </div>
     <div id="meta">loading…</div>
   </div>
 
   <script type="importmap">
     {
       "imports": {
-        "maplibre-gl": "https://esm.sh/maplibre-gl@4",
+        "maplibre-gl": "https://esm.sh/maplibre-gl@5",
         "@carbonplan/zarr-layer": "https://esm.sh/@carbonplan/zarr-layer"
       }
     }
@@ -138,9 +154,20 @@
       center: [-95, 40],
       zoom: 3,
     });
+    // 2026-08-21: globe view (per Taylor -- see
+    // https://hazard.degreeday.org/?layer=wildfire for the reference look).
+    // There's no `projection` constructor option in maplibre-gl's
+    // `MapOptions` (checked the real v5.24.0 dist/maplibre-gl.d.ts) --
+    // `setProjection` is the documented way to switch it after construction.
+    map.setProjection({ type: "globe" });
 
     let activeModel = "best_loss";
-    let activeStorePath = null;
+    // The full step list for the currently-loaded cycle (see
+    // resolveLatestRun below) -- fetched once per model load, not
+    // re-fetched on every slider move, so dragging the slider is instant
+    // rather than round-tripping to latest.json each time.
+    let activeSteps = []; // [{step_hours, valid_time, store}, ...] ascending
+    let activeCycleTime = null;
     const activeLayers = new Map(); // className -> ZarrLayer instance
 
     function setMeta(text, isError = false) {
@@ -173,24 +200,34 @@
       }
     }
 
-    async function resolveLatestStore(model) {
+    // ZarrLayer calls `new URL(source)` internally with no base argument,
+    // which throws ("Failed to construct 'URL': Invalid URL") for a
+    // root-relative path like "/data/best_loss/....zarr" -- confirmed
+    // live, 2026-08-21: latest.json fetched fine (fetch() tolerates
+    // relative paths against the document base) but all four layers
+    // silently failed `onLoadingStateChange`/console-errored out during
+    // construction, so nothing ever painted despite the panel showing a
+    // real cycle time. `new URL(path, window.location.origin)` resolves it
+    // to an absolute URL first.
+    function absoluteStorePath(model, storeName) {
+      return new URL(`${ZARR_ROOT}/${model}/${storeName}`, window.location.origin).toString();
+    }
+
+    async function resolveLatestRun(model) {
       // Each model directory publishes a small latest.json pointer file
-      // (written by the scheduler after each successful cycle) so the
-      // frontend never has to guess the most recent IFS cycle's store name.
+      // (written by scheduler/run_cycle.py after each successful cycle) so
+      // the frontend never has to guess the most recent IFS cycle's store
+      // names. Shape as of 2026-08-21 (multi-step forecast product, every
+      // 6h out to 240h -- 90h for 06Z/18Z cycles, see
+      // ecmwf_ifs.target_steps_for_cycle):
+      //   {"cycle_time": "...", "steps": [{"step_hours", "valid_time", "store"}, ...]}
       const res = await fetch(MODELS[model].latestPointer, { cache: "no-store" });
       if (!res.ok) throw new Error(`no published run for ${model} (HTTP ${res.status})`);
-      const { store, cycle_time } = await res.json();
-      // ZarrLayer calls `new URL(source)` internally with no base argument,
-      // which throws ("Failed to construct 'URL': Invalid URL") for a
-      // root-relative path like "/data/best_loss/....zarr" -- confirmed
-      // live, 2026-08-21: latest.json fetched fine (fetch() tolerates
-      // relative paths against the document base) but all four layers
-      // silently failed `onLoadingStateChange`/console-errored out during
-      // construction, so nothing ever painted despite the panel showing a
-      // real cycle time. `new URL(path, window.location.origin)` resolves
-      // it to an absolute URL first.
-      const storePath = new URL(`${ZARR_ROOT}/${model}/${store}`, window.location.origin).toString();
-      return { storePath, cycleTime: cycle_time };
+      const { cycle_time, steps } = await res.json();
+      if (!Array.isArray(steps) || steps.length === 0) {
+        throw new Error(`latest.json for ${model} has no published steps`);
+      }
+      return { cycleTime: cycle_time, steps };
     }
 
     function clearLayers() {
@@ -200,31 +237,65 @@
       activeLayers.clear();
     }
 
+    function formatLeadHours(h) {
+      return h === 0 ? "T+0" : `T+${h}h`;
+    }
+
+    function showStep(index) {
+      const step = activeSteps[index];
+      if (!step) return;
+      const storePath = absoluteStorePath(activeModel, step.store);
+      clearLayers();
+      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
+        const layer = new ZarrLayer({
+          id: `fronts-${cls}`,
+          source: storePath,
+          variable: cls,
+          clim: [0, 1],
+          // Two identical stops: customFrag (below) is what actually
+          // varies alpha by probability, so the colormap texture itself
+          // just needs to resolve to this class's solid color at every
+          // x-coordinate it's sampled at.
+          colormap: [style.color, style.color],
+          customFrag: customClassFrag(cls),
+          opacity: 0.85,
+        });
+        map.addLayer(layer);
+        activeLayers.set(cls, layer);
+      }
+      document.getElementById("time-valid").textContent = step.valid_time;
+      document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
+      setMeta(`${MODELS[activeModel].label} · cycle ${activeCycleTime}`);
+    }
+
+    function setupTimeSlider() {
+      const control = document.getElementById("time-control");
+      const slider = document.getElementById("time-slider");
+      if (activeSteps.length <= 1) {
+        // Nothing meaningful to slide over (e.g. a 06Z/18Z cycle that's
+        // only gotten through step 0 so far) -- hide rather than show a
+        // slider that can't move.
+        control.style.display = "none";
+        return;
+      }
+      control.style.display = "block";
+      slider.max = String(activeSteps.length - 1);
+      slider.value = "0";
+      // Reassigning oninput (rather than addEventListener, which would
+      // stack a new listener every model load) since loadModel() can run
+      // more than once per page life.
+      slider.oninput = (e) => showStep(Number(e.target.value));
+    }
+
     async function loadModel(model) {
       activeModel = model;
       setMeta("loading…");
       try {
-        const { storePath, cycleTime } = await resolveLatestStore(model);
-        activeStorePath = storePath;
-        clearLayers();
-        for (const [cls, style] of Object.entries(CLASS_STYLE)) {
-          const layer = new ZarrLayer({
-            id: `fronts-${cls}`,
-            source: storePath,
-            variable: cls,
-            clim: [0, 1],
-            // Two identical stops: customFrag (below) is what actually
-            // varies alpha by probability, so the colormap texture itself
-            // just needs to resolve to this class's solid color at every
-            // x-coordinate it's sampled at.
-            colormap: [style.color, style.color],
-            customFrag: customClassFrag(cls),
-            opacity: 0.85,
-          });
-          map.addLayer(layer);
-          activeLayers.set(cls, layer);
-        }
-        setMeta(`${MODELS[model].label} · cycle ${cycleTime}`);
+        const { cycleTime, steps } = await resolveLatestRun(model);
+        activeCycleTime = cycleTime;
+        activeSteps = steps;
+        setupTimeSlider();
+        showStep(0); // T+0 by default
       } catch (err) {
         console.error(err);
         setMeta(`${MODELS[model].label}: ${err.message}`, true);
