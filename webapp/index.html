@@ -121,18 +121,45 @@
       stationary: { color: "#37b24d", label: "Stationary" },
       occluded: { color: "#a445ff", label: "Occluded" },
     };
+    // Number of discrete probability bands for the filled-contour look
+    // below -- shared so the legend/panel could reference it later if we
+    // ever want to show the band thresholds there.
+    const N_CONTOUR_BANDS = 5;
+
     function customClassFrag(cls) {
       // `cls` becomes the GLSL identifier for this band's decoded value
       // (see the comment block above) -- safe here since CLASS_STYLE's
       // keys are all plain lowercase words, valid GLSL identifiers with
       // no interpolation risk.
+      //
+      // 2026-08-21: swapped from a smooth alpha gradient (alpha == the raw
+      // rescaled probability, so it faded continuously from transparent to
+      // opaque) to filled contour bands, per Taylor -- quantize `rescaled`
+      // into N_CONTOUR_BANDS discrete steps and use a stepped opacity per
+      // band instead of a continuous one. The lowest band (probability
+      // roughly < 1/N_CONTOUR_BANDS) is discarded entirely rather than
+      // drawn at low opacity, so it reads as "not a front" instead of a
+      // faint haze -- much closer to how a topo map's lowest contour
+      // interval is left unfilled. Since `colormap` is still just two
+      // identical hex stops (see the comment above CLASS_STYLE), `c.rgb`
+      // is already a flat, single hue regardless of `rescaled` -- only
+      // opacity carries the banding, which is what produces the visible
+      // hard edges between bands rather than a smooth fill.
       return `
         if (isnan(${cls}_tex) || isnan(${cls})) {
           discard;
         }
         float rescaled = clamp((${cls} - clim.x) / (clim.y - clim.x), 0.0, 1.0);
+
+        float nBands = ${N_CONTOUR_BANDS.toFixed(1)};
+        float band = min(floor(rescaled * nBands), nBands - 1.0);
+        if (band < 1.0) {
+          discard; // lowest band = "not a front" -- leave unfilled
+        }
+        float bandOpacity = (band + 1.0) / nBands; // stepped, e.g. 0.4/0.6/0.8/1.0 for 5 bands
+
         vec4 c = texture(colormap, vec2(rescaled, 0.5));
-        gl_FragColor = vec4(c.rgb, opacity * rescaled);
+        gl_FragColor = vec4(c.rgb, opacity * bandOpacity);
         gl_FragColor.rgb *= gl_FragColor.a;
       `;
     }
