@@ -1,0 +1,54 @@
+# fronts.espr.ai -- static viewer + read-only zarr data, served from the
+# Proxmox VM/CT that runs frontfinder. Reach it via a Cloudflare Tunnel
+# (avoids port-forwarding / exposing mandelhub's residential IP), per the
+# same pattern used for the earlier zarr hazard-viewer prototype.
+#
+# auto_https off + the explicit http:// prefix below are both required, not
+# stylistic: Cloudflare Tunnel terminates TLS externally, so Caddy trying to
+# obtain its own cert for this domain fails, and without `auto_https off` it
+# still binds 443 and redirects all :80 traffic there -- confirmed live on
+# CT108 (ERR_SSL_PROTOCOL_ERROR, then connection-refused-on-80, until both
+# of these were set). A bare `fronts.espr.ai {` site address is NOT enough
+# by itself; Caddy still defaults to binding 443 unless the address
+# explicitly says `http://`.
+{
+	auto_https off
+}
+
+http://fronts.espr.ai {
+    # `handle_path` and `handle` here MUST both be `handle`-family blocks,
+    # evaluated in source order with first-match-wins semantics -- that's
+    # the only way /data/* reliably reaches the zarr store root instead of
+    # the webapp's fallback. Confirmed live (2026-08-21): with `try_files`
+    # as a bare top-level directive (the earlier version of this file),
+    # Caddy's *fixed* directive-execution order runs `try_files` before
+    # `handle_path` regardless of where each is written in the Caddyfile --
+    # so every request, including `/data/best_loss/latest.json`, hit
+    # try_files first, found no matching file under the webapp root, and
+    # silently rewrote to /index.html. The browser then tried to
+    # `JSON.parse()` the HTML shell it got back for latest.json:
+    # `SyntaxError: Unexpected token '<', "<!doctype "... is not valid
+    # JSON` -- which is what showed up in the console while the map sat on
+    # "loading..." forever. Wrapping the webapp's file_server + try_files in
+    # its own `handle {}` fixes it: handle/handle_path share one mutually-
+    # exclusive routing group, so /data/* is claimed by handle_path before
+    # the catch-all handle block ever runs try_files against it.
+
+    # Zarr pyramid stores + latest.json pointers, written by
+    # frontfinder.scheduler.run_cycle on each IFS cycle. Served read-only,
+    # range-request support is on by default in Caddy's file_server.
+    handle_path /data/* {
+        root * /srv/frontfinder/output
+        file_server browse
+        header Cache-Control "public, max-age=60"   # short TTL: latest.json changes ~4x/day
+        header Access-Control-Allow-Origin "*"       # zarr-layer reads chunks via fetch()
+    }
+
+    handle {
+        root * /srv/frontfinder/webapp
+        file_server
+        try_files {path} /index.html
+    }
+
+    encode gzip
+}

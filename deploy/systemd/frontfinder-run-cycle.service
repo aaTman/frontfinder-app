@@ -1,0 +1,31 @@
+[Unit]
+Description=frontfinder: run one IFS cycle for both models
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root: everything on CT108 has been set up and run as root so far
+# (no sudo on this container -- see the setup walkthrough -- and no
+# dedicated "frontfinder" user/ownership was ever created for /srv/frontfinder).
+# Matches actual practice rather than aspiring to a user that doesn't exist
+# yet. Harden later by creating a dedicated user + chown'ing /srv/frontfinder
+# if this container ever runs anything else.
+User=root
+WorkingDirectory=/srv/frontfinder
+Environment=PYTHONUNBUFFERED=1
+# `uv run` resolves/creates .venv from pyproject.toml + uv.lock on its own
+# (no separate `uv sync` provisioning step needed), and is idempotent -- an
+# already-satisfied lock is a fast no-op before ExecStart's real work runs.
+ExecStart=/usr/local/bin/uv run --project /srv/frontfinder python -m frontfinder.scheduler.cli \
+    --model-dir /srv/frontfinder/models \
+    --output-root /srv/frontfinder/output \
+    --cache-dir /srv/frontfinder/ifs_cache \
+    --retention-days 10
+
+# A single stuck ecmwf-opendata download or a slow CPU inference pass should
+# not hang forever and block the next timer firing.
+TimeoutStartSec=3h
+
+[Install]
+WantedBy=multi-user.target
