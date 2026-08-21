@@ -217,7 +217,17 @@
     }
 
     function clearLayers() {
-      for (const cls of Object.keys(activeLayers)) {
+      // 2026-08-21 fix: activeLayers is a Map, not a plain object --
+      // Object.keys(aMapInstance) always returns [] (a Map's entries
+      // aren't its own enumerable properties), so this loop never ran and
+      // old layers were never removed. showStep() would then try to
+      // map.addLayer() a new layer under the same id (e.g. "fronts-cold")
+      // that was still present from the previous step, which throws --
+      // confirmed live: this silently broke every slider move after the
+      // first (the initial T+0 load has nothing to clear, so it always
+      // looked fine until you actually dragged the slider). Map.keys() is
+      // the fix.
+      for (const cls of activeLayers.keys()) {
         if (map.getLayer(`fronts-${cls}`)) map.removeLayer(`fronts-${cls}`);
       }
       activeLayers.clear();
