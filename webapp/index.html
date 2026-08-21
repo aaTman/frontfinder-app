@@ -122,24 +122,19 @@
       occluded: { color: "#a445ff", label: "Occluded" },
     };
     // Raw-probability breakpoints for the filled-contour look below.
-    // 2026-08-21, third pass: the first two attempts binned as a FRACTION
-    // OF THE FULL [0,1] clim RANGE (discard bottom 1/5, then bottom 1/2)
-    // -- that assumes front probabilities actually use most of that
-    // range. They don't: a percentile check against a real production
-    // store (`uv run python` + xarray/numpy on CT108) showed the field is
-    // heavily right-skewed -- median ~0.0002-0.0006 for every class (i.e.
-    // almost the entire grid genuinely has no front there, which is
-    // correct), with p99.9 only ~0.09-0.27 and per-class maxima around
-    // 0.42-0.63. 0.5 raw probability (the "discard bottom half" attempt)
-    // is above the 99.9th percentile for every class, so that version
-    // nearly erased the map. These thresholds are fixed absolute
-    // probabilities chosen from that real distribution instead of a
-    // fraction of the theoretical range -- roughly p90 (background
-    // cutoff), a "notable" tier, and a "strong" tier near the observed
-    // maxima. Revisit if the model/training changes the output scale.
-    const FRONT_DISCARD_BELOW = 0.02; // below this = background noise, not a front
-    const FRONT_BAND_2 = 0.06;
-    const FRONT_BAND_3 = 0.15;
+    // 2026-08-21, fourth pass: Taylor's explicit call after seeing the
+    // real distribution (a percentile check against a real production
+    // store showed median ~0.0002-0.0006 and per-class maxima only
+    // 0.42-0.63 -- see the two earlier, wrong attempts in git history)
+    // was to use even 0.1-wide bins all the way to 1.0 anyway, rather
+    // than concentrate resolution in the 0-0.3 range where the data
+    // actually varies. That means bins above ~0.4-0.5 will rarely or
+    // never populate for this model/dataset -- known and intentional,
+    // not a bug -- headroom for future model versions or more extreme
+    // patterns matters more here than maximizing today's visual detail.
+    const FRONT_DISCARD_BELOW = 0.01; // below this = background noise, not a front
+    const FRONT_BIN_WIDTH = 0.1;
+    const FRONT_N_BINS = 10; // 0.1-0.2, 0.2-0.3, ... 0.9-1.0, plus the 0.01-0.1 bin
 
     function customClassFrag(cls) {
       // `cls` becomes the GLSL identifier for this band's decoded value
@@ -150,14 +145,15 @@
       // 2026-08-21: swapped from a smooth alpha gradient (alpha == the raw
       // probability, so it faded continuously from transparent to opaque)
       // to filled contour bands, per Taylor -- see the comment above
-      // FRONT_DISCARD_BELOW for the two iterations that got the actual
-      // thresholds wrong before this one. Since `colormap` is still just
-      // two identical hex stops (see the comment above CLASS_STYLE),
-      // `c.rgb` is already a flat, single hue -- only opacity carries the
-      // banding, which is what produces hard edges instead of a smooth
-      // fill. `clim` (still [0,1] on the ZarrLayer constructor below) is
-      // intentionally NOT used for this banding anymore -- the thresholds
-      // here are absolute probabilities, not a fraction of clim's range.
+      // FRONT_DISCARD_BELOW for how the actual bin widths were chosen
+      // (and the two earlier, wrong attempts before this one). Since
+      // `colormap` is still just two identical hex stops (see the
+      // comment above CLASS_STYLE), `c.rgb` is already a flat, single
+      // hue -- only opacity carries the banding, which is what produces
+      // hard edges instead of a smooth fill. `clim` (still [0,1] on the
+      // ZarrLayer constructor below) is intentionally NOT used for this
+      // banding -- the bins here are absolute probabilities, not a
+      // fraction of clim's range.
       return `
         if (isnan(${cls}_tex) || isnan(${cls})) {
           discard;
@@ -167,9 +163,11 @@
         if (p < ${FRONT_DISCARD_BELOW.toFixed(3)}) {
           discard; // background noise, not a front -- see comment above
         }
-        float bandOpacity = p < ${FRONT_BAND_2.toFixed(3)}
-          ? 0.55
-          : (p < ${FRONT_BAND_3.toFixed(3)} ? 0.75 : 1.0);
+        // Evenly-spaced 0.1-wide bins from 0.1 up to 1.0, plus the
+        // narrower 0.01-0.1 "just above background" bin. Opacity ramps
+        // linearly across all ${FRONT_N_BINS} bins.
+        float bin = min(floor(p / ${FRONT_BIN_WIDTH.toFixed(3)}), ${(FRONT_N_BINS - 1).toFixed(1)});
+        float bandOpacity = (bin + 1.0) / ${FRONT_N_BINS.toFixed(1)};
 
         vec4 c = texture(colormap, vec2(0.5, 0.5)); // flat hue -- see comment above
         gl_FragColor = vec4(c.rgb, opacity * bandOpacity);
