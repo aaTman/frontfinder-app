@@ -62,11 +62,27 @@
       background: #1c2130; color: #c8cbd6; border: 1px solid #3a3f4d;
       border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;
     }
-    .legend-row { margin: 6px 0; }
+    .legend-row { margin: 6px 0 14px; }
+    .legend-row:last-child { margin-bottom: 0; }
     .legend-label { font-size: 11px; color: #c8cbd6; margin-bottom: 2px; }
     .legend-bands { display: flex; height: 10px; border-radius: 3px; overflow: hidden; }
     .legend-band { flex: 1; }
-    .legend-range { display: flex; justify-content: space-between; font-size: 10px; color: #8b90a0; margin-top: 6px; }
+    /* Colorbar tick row: a short vertical mark at every bin boundary, plus
+       a numeric label under every other one (all 11 labeled overlapped
+       into unreadable text at this card's width -- see the comment above
+       buildTicks() in the module script). Positions are absolute percents
+       lining up with the equal-width flex cells in .legend-bands above. */
+    .legend-ticks { position: relative; height: 14px; margin-top: 2px; }
+    .legend-tick-mark {
+      position: absolute; top: 0; width: 1px; height: 3px;
+      background: #4a4f5e;
+    }
+    .legend-tick-label {
+      position: absolute; top: 4px; transform: translateX(-50%);
+      font-size: 9px; color: #8b90a0; white-space: nowrap;
+    }
+    .legend-tick-label:first-of-type { transform: translateX(0); }
+    .legend-tick-label:last-of-type { transform: translateX(-100%); }
 
     /* Approximate hover readout -- see the big comment above
        estimateClassAlpha() in the module script for how "probability at
@@ -104,7 +120,6 @@
     </div>
     <div id="legend-content">
       <div id="legend-body"></div>
-      <div class="legend-range"><span id="legend-range-lo">0.01</span><span id="legend-range-hi">1.0</span></div>
     </div>
   </div>
   <div id="hover-tooltip"></div>
@@ -120,6 +135,19 @@
   <script type="module">
     import maplibregl from "maplibre-gl";
     import { ZarrLayer } from "@carbonplan/zarr-layer";
+    import {
+      CLASS_STYLE,
+      FRONT_DISCARD_BELOW,
+      FRONT_BIN_WIDTH,
+      FRONT_N_BINS,
+      hexToRgb01,
+      binForBandOpacity,
+      binLabel,
+      frontBinBoundaries,
+      labeledTickIndices,
+      formatTickLabel,
+      estimateClassAlpha,
+    } from "./lib.js";
 
     // -----------------------------------------------------------------
     // Config: which zarr pyramid store backs each model, and how each
@@ -164,26 +192,21 @@
       // its output again:
       // model_1702: { label: "model_1702", latestPointer: `${ZARR_ROOT}/model_1702/latest.json` },
     };
-    const CLASS_STYLE = {
-      cold: { color: "#3d6bff", label: "Cold" },
-      warm: { color: "#ff4d4d", label: "Warm" },
-      stationary: { color: "#37b24d", label: "Stationary" },
-      occluded: { color: "#a445ff", label: "Occluded" },
-    };
-    // Raw-probability breakpoints for the filled-contour look below.
-    // 2026-08-21, fourth pass: Taylor's explicit call after seeing the
-    // real distribution (a percentile check against a real production
-    // store showed median ~0.0002-0.0006 and per-class maxima only
-    // 0.42-0.63 -- see the two earlier, wrong attempts in git history)
-    // was to use even 0.1-wide bins all the way to 1.0 anyway, rather
-    // than concentrate resolution in the 0-0.3 range where the data
-    // actually varies. That means bins above ~0.4-0.5 will rarely or
-    // never populate for this model/dataset -- known and intentional,
-    // not a bug -- headroom for future model versions or more extreme
-    // patterns matters more here than maximizing today's visual detail.
-    const FRONT_DISCARD_BELOW = 0.01; // below this = background noise, not a front
-    const FRONT_BIN_WIDTH = 0.1;
-    const FRONT_N_BINS = 10; // 0.1-0.2, 0.2-0.3, ... 0.9-1.0, plus the 0.01-0.1 bin
+    // CLASS_STYLE and the FRONT_* bin constants now live in ./lib.js (also
+    // imported by lib.test.js) so the color palette and bin math can be
+    // unit-tested without a browser. See lib.js for the palette's
+    // colorblind-safety rationale and validate_palette.js invocation.
+    //
+    // 2026-08-21, fourth pass: Taylor's explicit call after seeing the real
+    // distribution (a percentile check against a real production store
+    // showed median ~0.0002-0.0006 and per-class maxima only 0.42-0.63 --
+    // see the two earlier, wrong attempts in git history) was to use even
+    // 0.1-wide bins all the way to 1.0 anyway, rather than concentrate
+    // resolution in the 0-0.3 range where the data actually varies. That
+    // means bins above ~0.4-0.5 will rarely or never populate for this
+    // model/dataset -- known and intentional, not a bug -- headroom for
+    // future model versions or more extreme patterns matters more here than
+    // maximizing today's visual detail.
 
     function customClassFrag(cls) {
       // `cls` becomes the GLSL identifier for this band's decoded value
@@ -353,13 +376,40 @@
     // that was the "Exact" option Taylor passed on this round.
     // -----------------------------------------------------------------
 
-    function hexToRgb01(hex) {
-      const n = parseInt(hex.slice(1), 16);
-      return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-    }
     const CLASS_RGB = Object.fromEntries(
       Object.entries(CLASS_STYLE).map(([cls, style]) => [cls, hexToRgb01(style.color)])
     );
+
+    // Colorbar: each class's band row gets a tick mark under every bin
+    // boundary plus a numeric label under every other one, so the bands
+    // read as a real colorbar rather than a bare min/max-labeled swatch --
+    // per Taylor's reference, https://hazard.degreeday.org/?layer=wildfire.
+    // Boundaries/labels come from lib.js's frontBinBoundaries()/
+    // labeledTickIndices() so the ticks can never drift out of sync with
+    // the bins customClassFrag actually renders. Positions are equal-width
+    // fractions matching the legend-band flex segments below (each bin
+    // renders as one equal-width flex cell regardless of its real
+    // probability width), not positions proportional to the probability
+    // values themselves.
+    //
+    // All 11 boundaries labeled was tried first and rejected: screenshotted
+    // the rendered legend at this card's width and the 9px labels
+    // overlapped into unreadable smashed text (narrowest gap, 0.01 next to
+    // 0.1, has no room for two ~4-char labels side by side). Every other
+    // boundary gets a number; every boundary still gets an unlabeled tick
+    // mark so the bin edges stay visible.
+    function buildTicks() {
+      const marks = frontBinBoundaries()
+        .map((_, i) => `<span class="legend-tick-mark" style="left:${(i / FRONT_N_BINS) * 100}%"></span>`)
+        .join("");
+      const labels = labeledTickIndices()
+        .map(
+          ({ value, index }) =>
+            `<span class="legend-tick-label" style="left:${(index / FRONT_N_BINS) * 100}%">${formatTickLabel(value)}</span>`
+        )
+        .join("");
+      return marks + labels;
+    }
 
     function buildLegend() {
       const body = document.getElementById("legend-body");
@@ -377,41 +427,10 @@
         row.innerHTML = `
           <div class="legend-label">${style.label}</div>
           <div class="legend-bands">${bands.join("")}</div>
+          <div class="legend-ticks">${buildTicks()}</div>
         `;
         body.appendChild(row);
       }
-    }
-
-    // Undoes customClassFrag's alpha math for one class, given the
-    // rendered pixel's RGB (0-1) and that class's pure hue (0-1): assumes
-    // the pixel is `white*(1-a) + classRgb*a` (i.e. this class alone,
-    // composited over a white basemap) and solves for `a` via
-    // least-squares projection onto the (white - classRgb) direction. See
-    // the caveats in the big comment above.
-    function estimateClassAlpha(pixelRgb01, classRgb01) {
-      let num = 0;
-      let den = 0;
-      for (let i = 0; i < 3; i++) {
-        const dir = 1 - classRgb01[i]; // white[i] - classRgb01[i]
-        const diff = 1 - pixelRgb01[i]; // white[i] - pixelRgb01[i]
-        num += diff * dir;
-        den += dir * dir;
-      }
-      if (den === 0) return 0;
-      return Math.max(0, Math.min(1, num / den));
-    }
-
-    // Inverts customClassFrag's `bandOpacity = (bin + 1) / FRONT_N_BINS`
-    // to recover which of the 10 discrete bins produced a given alpha.
-    function binForBandOpacity(bandOpacity) {
-      const bin = Math.round(bandOpacity * FRONT_N_BINS) - 1;
-      return Math.max(0, Math.min(FRONT_N_BINS - 1, bin));
-    }
-
-    function binLabel(bin) {
-      const lo = bin === 0 ? FRONT_DISCARD_BELOW : bin * FRONT_BIN_WIDTH;
-      const hi = (bin + 1) * FRONT_BIN_WIDTH;
-      return `${lo.toFixed(2)}–${hi.toFixed(1)}`;
     }
 
     // Below this estimated bandOpacity, treat the pixel as "no front here"

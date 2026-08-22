@@ -30,6 +30,38 @@ move. The slider is hidden when a cycle only has one published step so far
 (e.g. a 06Z/18Z run, or a 00Z/12Z run the timer caught mid-publish before
 its longer lead times were available).
 
+## Colors, bin math, and tests (`lib.js`)
+
+2026-08-21: `CLASS_STYLE` (the per-class hex colors), the `FRONT_*` bin
+constants, and the pure helper functions (`binForBandOpacity`, `binLabel`,
+`frontBinBoundaries`, `labeledTickIndices`, `formatTickLabel`,
+`estimateClassAlpha`, `hexToRgb01`) moved out of `index.html`'s inline
+module script into `lib.js`, a plain ES module with no DOM/browser
+dependency. `index.html` imports it via a relative `./lib.js` import (no
+build step, so this has to resolve as a real static file next to
+`index.html` on whatever serves this directory -- Caddy does that for free).
+
+`lib.test.js` covers `lib.js` with Node's built-in test runner: `node --test
+webapp/lib.test.js` (Node >= 18.17, no dependencies to install). Covers the
+color palette's shape (4 distinct hex classes, locked to the specific
+colorblind-safe order below) and the bin/tick/alpha-estimation math: bin
+round-tripping, tick-boundary/label generation, and the hover tooltip's
+pixel-to-alpha inversion.
+
+The 4 class colors (`#3987e5` cold / `#d95926` warm / `#199e70` stationary /
+`#c98500` occluded) replaced the original blue/red/green/purple set, which
+put warm=red next to stationary=green -- a classic deuteranopia collision.
+These are dark-mode slots 1-4 of the Claude Code `dataviz` skill's
+reference categorical palette, validated with that skill's
+`validate_palette.js` against this app's dark legend surface:
+`node scripts/validate_palette.js "#3987e5,#d95926,#199e70,#c98500" --mode
+dark --surface "#0f121a"` passes every check on the default adjacent-pair
+gate. It fails the stricter all-pairs gate (documented in the skill's own
+`palette.md` as expected past 3 slots) -- accepted here because every class
+also carries a legend swatch, a text label, and an independent checkbox
+toggle, which is the "secondary encoding" the skill requires to accept that.
+Re-run the validator if these colors ever change.
+
 ## Known API-version caveat (read before touching colors)
 
 topozarr's docs site describes an upcoming `layer_hints` API for embedding
