@@ -21,10 +21,13 @@ ExecStart=/usr/local/bin/uv run --project /srv/frontfinder-app python -m frontfi
     --model-dir /srv/frontfinder-app/models \
     --output-root /srv/frontfinder-app/output \
     --cache-dir /srv/frontfinder-app/ifs_cache \
-    --retention-days 10
+    --retention-days 10 \
+    --poll
 
 # A single stuck ecmwf-opendata download or a slow CPU inference pass should
-# not hang forever and block the next timer firing.
+# not hang forever and block the next timer firing. Also caps how long a
+# no-op poll (the common case, firing every 5 min) could ever block --
+# though in practice that path returns in well under a second.
 TimeoutStartSec=3h
 
 [Install]

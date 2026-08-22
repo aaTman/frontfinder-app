@@ -186,7 +186,7 @@
     // -----------------------------------------------------------------
     const ZARR_ROOT = "/data"; // Caddy serves the zarr store tree under /data -- see deploy/Caddyfile
     const MODELS = {
-      best_loss: { label: "best_loss", latestPointer: `${ZARR_ROOT}/best_loss/latest.json` },
+      "theta-e_uv_q": { label: "theta-e_uv_q", latestPointer: `${ZARR_ROOT}/theta-e_uv_q/latest.json` },
       // model_1702 disabled -- see the HTML comment above and
       // frontfinder/scheduler/cli.py. Re-add once the pipeline is producing
       // its output again:
@@ -266,7 +266,7 @@
       // the preserved buffer; negligible at this map's scale.
       preserveDrawingBuffer: true,
     });
-    let activeModel = "best_loss";
+    let activeModel = "theta-e_uv_q";
     // The full step list for the currently-loaded cycle (see
     // resolveLatestRun below) -- fetched once per model load, not
     // re-fetched on every slider move, so dragging the slider is instant
@@ -307,6 +307,49 @@
     let currentStepIndex = -1;
     const layersByStep = new Map(); // stepIndex -> Map(cls -> ZarrLayer); insertion order == LRU order (oldest first)
     const MAX_CACHED_STEPS = 8;
+    // Debounces the slider's oninput -> showStep() path; see the big
+    // comment in setupTimeSlider for why this exists.
+    let pendingShowStepTimer = null;
+    const SHOW_STEP_DEBOUNCE_MS = 120;
+
+    // 2026-08-22: serializes *new* step builds (steps not already in
+    // layersByStep), added because the debounce above only limits how often
+    // showStep() fires -- it does nothing to stop a single settled
+    // showStep() call, or a burst of them a debounce-interval apart while
+    // scrubbing steadily, from each kicking off 4 brand-new ZarrLayers (and
+    // their real network fetches) on top of whatever the previous step's
+    // fetches hadn't finished yet. Confirmed live: scrubbing across ~10
+    // never-before-visited steps in a couple seconds (well within what "the
+    // slider moving around like crazy" produces) queued 40 concurrent zarr
+    // chunk fetches against the browser's per-origin connection cap, which
+    // starved *all* of them, including whichever step the slider actually
+    // settled on -- so the map could sit blank for many seconds after the
+    // user stopped moving it, even though that final step's fetches had
+    // technically been issued early on.
+    //
+    // The fix: at most one never-before-seen step is ever being fetched at
+    // a time. `buildingIndex` is that step (or -1 if none); `pendingIndex`
+    // is the most recent *different* step requested while a build is
+    // already in flight -- only the latest such request is kept, so a fast
+    // scrub across many steps collapses to "finish whatever's loading, then
+    // load wherever the slider ended up," never a growing backlog. Revisits
+    // of already-cached steps (the common case once a session has warmed
+    // up) are unaffected -- those hit the `layersByStep.has()` cache-hit
+    // path in showStep() and are still instant.
+    let buildingIndex = -1;
+    let pendingIndex = null;
+    // Per-step load bookkeeping: which classes' chunks are still loading,
+    // via ZarrLayer's onLoadingStateChange (see buildStepLayers). Also
+    // doubles as eviction protection -- see evictOldCachedStepsIfNeeded.
+    const stepLoadState = new Map(); // stepIndex -> { pendingClasses: Set<cls>, loaded: bool }
+    // How many not-yet-visited neighboring steps to opportunistically
+    // prefetch (hidden) once the current step's own fetches settle and the
+    // browser is idle -- makes the single-step-at-a-time nudge of the
+    // slider (by far the most common interaction after the initial load)
+    // feel instant instead of re-triggering a fresh fetch every time.
+    const requestIdle = window.requestIdleCallback
+      ? (cb) => window.requestIdleCallback(cb, { timeout: 1000 })
+      : (cb) => setTimeout(cb, 200);
     // Whether each class's checkbox is currently checked -- read when
     // showing a step's layers, and mutated by the checkbox handler below.
     // Separate from any single step's layers since it has to apply across
@@ -332,15 +375,30 @@
     // exceeds MAX_CACHED_STEPS -- `layersByStep`'s insertion order is kept
     // as LRU order (showStep() re-inserts a step on every cache hit to
     // move it to the MRU end), so the oldest entry is always first.
+    // 2026-08-22: skips the current step, the step actively being built,
+    // and any step whose chunks are still loading (stepLoadState says
+    // `loaded: false`) -- evicting one of those used to be possible if
+    // enough *other* steps got visited first, which would removeLayer() a
+    // ZarrLayer out from under its own in-flight fetches. Confirmed this
+    // was reachable: with MAX_CACHED_STEPS=8, a slow connection, and a fast
+    // scrub, a step queued via `pendingIndex` (see above) could still be
+    // sitting in layersByStep mid-fetch by the time 8 other builds pushed
+    // it toward the front of the LRU order. If every cached entry is
+    // currently protected, this just leaves the cache oversized until the
+    // next call once something finishes loading -- self-correcting, and far
+    // better than aborting a fetch that's about to pay off.
     function evictOldCachedStepsIfNeeded() {
-      while (layersByStep.size > MAX_CACHED_STEPS) {
-        const oldestIndex = layersByStep.keys().next().value;
-        const oldestLayers = layersByStep.get(oldestIndex);
-        for (const cls of oldestLayers.keys()) {
-          const id = `fronts-${cls}-${oldestIndex}`;
+      for (const [index, stepLayers] of layersByStep) {
+        if (layersByStep.size <= MAX_CACHED_STEPS) break;
+        if (index === currentStepIndex || index === buildingIndex) continue;
+        const state = stepLoadState.get(index);
+        if (state && !state.loaded) continue;
+        for (const cls of stepLayers.keys()) {
+          const id = `fronts-${cls}-${index}`;
           if (map.getLayer(id)) map.removeLayer(id);
         }
-        layersByStep.delete(oldestIndex);
+        layersByStep.delete(index);
+        stepLoadState.delete(index);
       }
     }
 
@@ -436,8 +494,14 @@
     // Below this estimated bandOpacity, treat the pixel as "no front here"
     // rather than report a value -- see limitation (1) in the big comment
     // above. Half of the smallest real bin step is a starting point, not a
-    // carefully-tuned constant.
-    const HOVER_ALPHA_MIN = (FRONT_BIN_WIDTH / FRONT_N_BINS) * 0.5;
+    // carefully-tuned constant. customClassFrag's bandOpacity only ever
+    // takes the values 1/FRONT_N_BINS, 2/FRONT_N_BINS, ..., 1 -- so the
+    // smallest real step between adjacent rendered values is
+    // 1/FRONT_N_BINS, not FRONT_BIN_WIDTH/FRONT_N_BINS (that divided by
+    // the bin *width*, 0.1, for no reason -- gave a threshold 10x too
+    // small, so faint basemap tint like water/parks was passing the
+    // filter and showing up as a spurious low-value reading).
+    const HOVER_ALPHA_MIN = (1 / FRONT_N_BINS) * 0.5;
 
     let hoverGl = null;
     function getHoverGl() {
@@ -450,7 +514,35 @@
 
     function hideHoverTooltip() {
       document.getElementById("hover-tooltip").style.display = "none";
+      // Drop any in-flight rAF-scheduled read (see scheduleHoverUpdate
+      // below) so it can't reopen the tooltip after the cursor has left.
+      pendingHoverEvent = null;
     }
+
+    // gl.readPixels needs to run right after a real, complete paint, not
+    // off an independently-scheduled timer that could land mid-frame --
+    // hence hooking into maplibre's own "render" event (fires
+    // synchronously right after it finishes painting a frame) instead of
+    // requestAnimationFrame. But maplibre only paints on demand -- once
+    // the map is idle (nothing panning/zooming/loading), it stops firing
+    // "render" entirely. Just waiting on that event, as a first version
+    // of this fix did, meant the tooltip only ever updated when
+    // something ELSE happened to force a repaint (e.g. a click) --
+    // confirmed live: it wouldn't show at all until you clicked the map,
+    // then froze on that click's cursor position until the next click.
+    // The fix is to explicitly ask for a repaint on every mousemove via
+    // map.triggerRepaint() (cheap -- a no-op if one's already pending),
+    // which guarantees a "render" event actually follows shortly after,
+    // so the read the hover code depends on isn't left waiting on a
+    // repaint that would otherwise never come.
+    let pendingHoverEvent = null;
+    function scheduleHoverUpdate(e) {
+      pendingHoverEvent = e;
+      map.triggerRepaint();
+    }
+    map.on("render", () => {
+      if (pendingHoverEvent) updateHoverTooltip(pendingHoverEvent);
+    });
 
     function updateHoverTooltip(e) {
       const tooltip = document.getElementById("hover-tooltip");
@@ -472,6 +564,20 @@
         hideHoverTooltip();
         return;
       }
+      // gl.readPixels reads whatever framebuffer is currently bound in the
+      // context's state -- not necessarily the visible canvas backbuffer.
+      // This handler runs from a `mousemove` listener, outside maplibre's
+      // own render loop, so whatever framebuffer its renderer last left
+      // bound (its internal MSAA/offscreen target, not framebuffer 0) is
+      // whatever gets read otherwise. Confirmed live: without this bind,
+      // the readback was always (0,0,0) regardless of cursor position --
+      // which, fed through estimateClassAlpha, clamps to ~1 for every
+      // class (every class's direction vector from white has a positive
+      // dot product with the all-ones "diff" a black pixel produces),
+      // producing the same bogus 0.90-1.0 reading everywhere for every
+      // front. Binding the default framebuffer (id 0, i.e. the canvas
+      // itself) before reading fixes that.
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, hoverPixelBuf);
       const pixelRgb01 = [hoverPixelBuf[0] / 255, hoverPixelBuf[1] / 255, hoverPixelBuf[2] / 255];
 
@@ -529,7 +635,7 @@
 
     // ZarrLayer calls `new URL(source)` internally with no base argument,
     // which throws ("Failed to construct 'URL': Invalid URL") for a
-    // root-relative path like "/data/best_loss/....zarr" -- confirmed
+    // root-relative path like "/data/theta-e_uv_q/....zarr" -- confirmed
     // live, 2026-08-21: latest.json fetched fine (fetch() tolerates
     // relative paths against the document base) but all four layers
     // silently failed `onLoadingStateChange`/console-errored out during
@@ -572,11 +678,137 @@
         }
       }
       layersByStep.clear();
+      stepLoadState.clear();
       currentStepIndex = -1;
+      buildingIndex = -1;
+      pendingIndex = null;
     }
 
     function formatLeadHours(h) {
       return h === 0 ? "T+0" : `T+${h}h`;
+    }
+
+    // Updates just the text readout, with no layer work -- cheap enough to
+    // call on every single slider `input` tick so the displayed time keeps
+    // up with the thumb even while the actual step change is debounced (see
+    // pendingShowStepTimer below).
+    function previewStepLabel(index) {
+      const step = activeSteps[index];
+      if (!step) return;
+      document.getElementById("time-valid").textContent = step.valid_time;
+      document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
+    }
+
+    // Builds one step's 4 class ZarrLayers and caches them under `index`.
+    // Only called for steps not already in layersByStep -- see
+    // requestStepBuild for the gate that keeps at most one of these
+    // in flight at a time. Visibility is set immediately based on whether
+    // `index` is (still) the current step, so a queued build that resolves
+    // after the user has moved on stays hidden rather than flashing onto
+    // the map before the next build gets a turn.
+    function buildStepLayers(index) {
+      const step = activeSteps[index];
+      const storePath = absoluteStorePath(activeModel, step.store);
+      const stepLayers = new Map();
+      const pendingClasses = new Set(Object.keys(CLASS_STYLE));
+      stepLoadState.set(index, { pendingClasses, loaded: false });
+      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
+        const layer = new ZarrLayer({
+          id: `fronts-${cls}-${index}`,
+          source: storePath,
+          variable: cls,
+          clim: [0, 1],
+          // Two identical stops: customFrag (below) is what actually
+          // varies alpha by probability, so the colormap texture itself
+          // just needs to resolve to this class's solid color at every
+          // x-coordinate it's sampled at. `opacity` is fixed and never
+          // toggled -- `visibility` (via setStepVisibility) is what
+          // actually shows/hides this layer.
+          colormap: [style.color, style.color],
+          customFrag: customClassFrag(cls),
+          opacity: 0.85,
+          // Fires (at least) once metadata + chunks finish loading, and
+          // again on any later loading-state change (e.g. panning in new
+          // chunks) -- the `info.loaded` guard below means only the first
+          // "done loading" transition ever advances the build queue /
+          // triggers prefetch, later firings are no-ops for that purpose.
+          onLoadingStateChange: (state) => {
+            if (state.loading) return;
+            const info = stepLoadState.get(index);
+            if (!info || info.loaded) return;
+            info.pendingClasses.delete(cls);
+            if (info.pendingClasses.size === 0) {
+              info.loaded = true;
+              onStepFullyLoaded(index);
+            }
+          },
+        });
+        map.addLayer(layer);
+        stepLayers.set(cls, layer);
+      }
+      layersByStep.set(index, stepLayers);
+      setStepVisibility(index, currentStepIndex === index);
+      evictOldCachedStepsIfNeeded();
+    }
+
+    // Gate for buildStepLayers: if nothing else is building, start right
+    // away; otherwise remember `index` as the one to build next once the
+    // in-flight build finishes (overwriting any earlier-queued target --
+    // see the big comment on `buildingIndex`/`pendingIndex` above).
+    function requestStepBuild(index) {
+      if (layersByStep.has(index)) return; // already built or already the in-flight build
+      if (buildingIndex !== -1) {
+        pendingIndex = index;
+        return;
+      }
+      buildingIndex = index;
+      buildStepLayers(index);
+    }
+
+    // Called once a step's 4 layers have all finished their initial load.
+    // Advances to whatever step was requested in the meantime, or -- if the
+    // user has settled -- opportunistically prefetches a neighboring step.
+    function onStepFullyLoaded(index) {
+      if (buildingIndex === index) buildingIndex = -1;
+      refreshMeta();
+      if (pendingIndex !== null && pendingIndex !== index) {
+        const next = pendingIndex;
+        pendingIndex = null;
+        requestStepBuild(next);
+      } else {
+        pendingIndex = null;
+        schedulePrefetchNeighbors(currentStepIndex);
+      }
+    }
+
+    // Prefetches one not-yet-cached neighbor of `index` (hidden) once the
+    // browser is idle, so nudging the slider one step in either direction
+    // -- the overwhelmingly common interaction once a session has warmed
+    // up -- is instant instead of triggering a fresh fetch. Only runs when
+    // nothing else is queued/building, so it never competes with real
+    // navigation, and only ever prefetches one step per idle callback (the
+    // other neighbor gets its turn the next time this fires, chained via
+    // onStepFullyLoaded's else-branch).
+    function schedulePrefetchNeighbors(index) {
+      requestIdle(() => {
+        if (buildingIndex !== -1 || pendingIndex !== null) return;
+        if (currentStepIndex !== index) return; // stale -- slider moved on
+        for (const neighbor of [index + 1, index - 1]) {
+          if (neighbor < 0 || neighbor >= activeSteps.length) continue;
+          if (layersByStep.has(neighbor)) continue;
+          requestStepBuild(neighbor);
+          return;
+        }
+      });
+    }
+
+    // Reflects whether the currently-displayed step is still loading (a
+    // fresh build, or waiting behind another build in the queue) in the
+    // meta line, so scrubbing to a new step gives some feedback instead of
+    // silently sitting on the previous step's frame.
+    function refreshMeta() {
+      const loading = buildingIndex === currentStepIndex || pendingIndex === currentStepIndex;
+      setMeta(`${MODELS[activeModel].label} · cycle ${activeCycleTime}${loading ? " · loading…" : ""}`);
     }
 
     function showStep(index) {
@@ -586,49 +818,29 @@
       // Hide (not remove) whatever step is currently showing, via
       // `visibility` -- see the big comment on `layersByStep` above for
       // why this is `visibility` and not `opacity`.
-      if (currentStepIndex !== -1) {
+      if (currentStepIndex !== -1 && currentStepIndex !== index) {
         setStepVisibility(currentStepIndex, false);
       }
+      currentStepIndex = index;
 
-      let stepLayers = layersByStep.get(index);
+      const stepLayers = layersByStep.get(index);
       if (stepLayers) {
-        // Cache hit: re-insert to move this step to the MRU end of
-        // layersByStep's iteration order (see evictOldCachedStepsIfNeeded).
+        // Cache hit (including a build already in flight for this exact
+        // index): re-insert to move this step to the MRU end of
+        // layersByStep's iteration order (see evictOldCachedStepsIfNeeded),
+        // and make sure it's the visible one.
         layersByStep.delete(index);
         layersByStep.set(index, stepLayers);
+        setStepVisibility(index, true);
       } else {
-        // First time this step has been shown this page load -- build its
-        // 4 class layers once and cache them under `index`.
-        stepLayers = new Map();
-        const storePath = absoluteStorePath(activeModel, step.store);
-        for (const [cls, style] of Object.entries(CLASS_STYLE)) {
-          const layer = new ZarrLayer({
-            id: `fronts-${cls}-${index}`,
-            source: storePath,
-            variable: cls,
-            clim: [0, 1],
-            // Two identical stops: customFrag (below) is what actually
-            // varies alpha by probability, so the colormap texture itself
-            // just needs to resolve to this class's solid color at every
-            // x-coordinate it's sampled at. `opacity` is fixed and never
-            // toggled -- `visibility` (via setStepVisibility) is what
-            // actually shows/hides this layer.
-            colormap: [style.color, style.color],
-            customFrag: customClassFrag(cls),
-            opacity: 0.85,
-          });
-          map.addLayer(layer);
-          stepLayers.set(cls, layer);
-        }
-        layersByStep.set(index, stepLayers);
-        evictOldCachedStepsIfNeeded();
+        // Not built yet -- request a (possibly queued) build; see
+        // requestStepBuild for why this doesn't just build inline.
+        requestStepBuild(index);
       }
-      currentStepIndex = index;
-      setStepVisibility(index, true);
 
       document.getElementById("time-valid").textContent = step.valid_time;
       document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
-      setMeta(`${MODELS[activeModel].label} · cycle ${activeCycleTime}`);
+      refreshMeta();
     }
 
     function setupTimeSlider() {
@@ -647,7 +859,48 @@
       // Reassigning oninput (rather than addEventListener, which would
       // stack a new listener every model load) since loadModel() can run
       // more than once per page life.
-      slider.oninput = (e) => showStep(Number(e.target.value));
+      //
+      // 2026-08-22: debounced, because oninput fires continuously while
+      // dragging -- with every tick calling showStep() directly, scrubbing
+      // quickly across many never-before-seen steps built 4 brand-new
+      // ZarrLayers (and their real zarr-chunk fetches) per tick, far faster
+      // than they could load. The browser's per-origin connection cap then
+      // queued most of those fetches behind each other, and
+      // evictOldCachedStepsIfNeeded (see layersByStep above) was removing
+      // the oldest steps' layers before their in-flight fetches ever
+      // resolved -- so the connection pool stayed clogged with requests for
+      // steps already scrolled past, and the step the slider actually
+      // settled on never got its turn. Confirmed live: fast scrubbing made
+      // earlier steps' data vanish (expected -- that's the cache evicting)
+      // and then loading stall entirely, not just look laggy.
+      //
+      // The label still updates on every tick via previewStepLabel (cheap,
+      // no network) so the slider feels responsive; only the expensive
+      // layer-build/fetch path in showStep is delayed until the thumb has
+      // been still for SHOW_STEP_DEBOUNCE_MS.
+      slider.oninput = (e) => {
+        const index = Number(e.target.value);
+        previewStepLabel(index);
+        if (pendingShowStepTimer !== null) clearTimeout(pendingShowStepTimer);
+        pendingShowStepTimer = setTimeout(() => {
+          pendingShowStepTimer = null;
+          showStep(index);
+        }, SHOW_STEP_DEBOUNCE_MS);
+      };
+      // `change` fires once the user releases the thumb (or commits via
+      // keyboard) -- flush the pending debounce immediately at that point
+      // rather than making them wait out the remaining
+      // SHOW_STEP_DEBOUNCE_MS after they've already stopped moving it.
+      // `showStep` itself is idempotent/cheap on a cache hit and safely
+      // queued on a miss (see requestStepBuild), so calling it here even
+      // when the debounce already fired first is harmless.
+      slider.onchange = (e) => {
+        if (pendingShowStepTimer !== null) {
+          clearTimeout(pendingShowStepTimer);
+          pendingShowStepTimer = null;
+        }
+        showStep(Number(e.target.value));
+      };
     }
 
     async function loadModel(model) {
@@ -657,6 +910,10 @@
       // there's only one enabled model -- see the panel's HTML comment --
       // but loadModel() is written to support more than one.)
       clearAllCachedLayers();
+      if (pendingShowStepTimer !== null) {
+        clearTimeout(pendingShowStepTimer);
+        pendingShowStepTimer = null;
+      }
       activeModel = model;
       setMeta("loading…");
       try {
@@ -679,7 +936,7 @@
       content.style.display = hidden ? "block" : "none";
       e.target.textContent = hidden ? "Hide" : "Show";
     });
-    map.on("mousemove", updateHoverTooltip);
+    map.on("mousemove", scheduleHoverUpdate);
     map.on("mouseout", hideHoverTooltip);
     map.on("load", () => {
       // 2026-08-21: globe view (per Taylor -- see

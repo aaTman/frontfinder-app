@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from frontfinder.config.manifests import BEST_LOSS_MANIFEST, MODEL_1702_MANIFEST
+from frontfinder.config.manifests import THETA_E_UV_Q_MANIFEST, MODEL_1702_MANIFEST
 from frontfinder.ingest.ecmwf_ifs import (
     SIX_HOURLY_STEPS_TO_240H,
     EcmwfOpenDataSource,
@@ -36,13 +36,13 @@ def test_ifs_cycle_accepts_valid_synoptic_hours():
         IFSCycle(date="2026-08-19", run_hour=h)
 
 
-def test_assemble_best_loss_input_has_24_channels(small_source):
+def test_assemble_theta_e_uv_q_input_has_24_channels(small_source):
     # 30 originally (5 vars x 6 levels); potential_vorticity dropped
-    # 2026-08-20 -- see BEST_LOSS_MANIFEST's docstring -- leaving 4 vars x 6
+    # 2026-08-20 -- see THETA_E_UV_Q_MANIFEST's docstring -- leaving 4 vars x 6
     # levels = 24 (theta-e stays; Taylor confirmed the retrained model still
     # uses it, just not PV).
     cycle = IFSCycle(date="2026-08-19", run_hour=12)
-    arr = assemble_model_input(BEST_LOSS_MANIFEST, small_source, cycle)
+    arr = assemble_model_input(THETA_E_UV_Q_MANIFEST, small_source, cycle)
     assert arr.shape == (17, 21, 24)
     assert np.all(np.isfinite(arr))
 
@@ -56,16 +56,16 @@ def test_assemble_model_1702_input_has_25_channels(small_source):
 
 def test_assemble_is_deterministic_for_same_cycle(small_source):
     cycle = IFSCycle(date="2026-08-19", run_hour=12)
-    arr1 = assemble_model_input(BEST_LOSS_MANIFEST, small_source, cycle)
-    arr2 = assemble_model_input(BEST_LOSS_MANIFEST, small_source, cycle)
+    arr1 = assemble_model_input(THETA_E_UV_Q_MANIFEST, small_source, cycle)
+    arr2 = assemble_model_input(THETA_E_UV_Q_MANIFEST, small_source, cycle)
     np.testing.assert_array_equal(arr1, arr2)
 
 
 def test_assemble_differs_between_cycles(small_source):
     cycle_a = IFSCycle(date="2026-08-19", run_hour=0)
     cycle_b = IFSCycle(date="2026-08-19", run_hour=12)
-    arr_a = assemble_model_input(BEST_LOSS_MANIFEST, small_source, cycle_a)
-    arr_b = assemble_model_input(BEST_LOSS_MANIFEST, small_source, cycle_b)
+    arr_a = assemble_model_input(THETA_E_UV_Q_MANIFEST, small_source, cycle_a)
+    arr_b = assemble_model_input(THETA_E_UV_Q_MANIFEST, small_source, cycle_b)
     assert not np.array_equal(arr_a, arr_b)
 
 
@@ -80,7 +80,7 @@ def test_assemble_channel_order_is_level_major_not_variable_major(small_source):
     # Only channel 0 (theta_e@1000) should be in a plausible Kelvin range;
     # channel 1 (u@1000, level-major) should NOT be -- it's a wind speed.
     cycle = IFSCycle(date="2026-08-19", run_hour=12)
-    arr = assemble_model_input(BEST_LOSS_MANIFEST, small_source, cycle)
+    arr = assemble_model_input(THETA_E_UV_Q_MANIFEST, small_source, cycle)
     assert np.all(arr[..., 0] > 200) and np.all(arr[..., 0] < 500)  # theta_e@1000
     assert not np.all((arr[..., 1] > 200) & (arr[..., 1] < 500))  # u@1000, not theta_e@925
 
@@ -89,12 +89,12 @@ def test_assemble_channel_order_matches_manifest_channel_names_exactly(small_sou
     # Stronger version of the above: fetch every DIRECT (variable, level)
     # pair straight from the same fake source and confirm
     # assemble_model_input's output is a bit-exact match, position by
-    # position, against BEST_LOSS_MANIFEST.channel_names()'s documented
+    # position, against THETA_E_UV_Q_MANIFEST.channel_names()'s documented
     # order for every non-derived channel -- not just a plausibility check
     # on a couple of channels.
     cycle = IFSCycle(date="2026-08-19", run_hour=12)
-    arr = assemble_model_input(BEST_LOSS_MANIFEST, small_source, cycle)
-    names = BEST_LOSS_MANIFEST.channel_names()
+    arr = assemble_model_input(THETA_E_UV_Q_MANIFEST, small_source, cycle)
+    names = THETA_E_UV_Q_MANIFEST.channel_names()
     assert len(names) == arr.shape[-1]
 
     direct_lookup = {
@@ -198,25 +198,29 @@ def test_fetch_pressure_level_caches_by_variable_level_and_cycle(tmp_path, monke
     assert calls == [("t", (850,))]
 
 
-def test_available_forecast_steps_00z_12z_go_to_240h_with_coarsening_at_150h():
+def test_available_forecast_steps_00z_12z_go_to_360h_with_coarsening_at_150h():
     for run_hour in (0, 12):
         steps = available_forecast_steps(run_hour)
         assert steps[0] == 0
-        assert steps[-1] == 240
+        assert steps[-1] == 360
         # 3-hourly through 144h...
         assert 3 in steps and 141 in steps and 144 in steps
         # ...then 6-hourly only beyond 144h -- 147 was never published.
         assert 147 not in steps
-        assert 150 in steps and 156 in steps
+        assert 150 in steps and 156 in steps and 240 in steps and 360 in steps
 
 
-def test_available_forecast_steps_06z_18z_cap_at_90h():
+def test_available_forecast_steps_06z_18z_cap_at_144h():
+    # 2026-08-22: live-confirmed against the real AWS bucket -- 06Z/18Z's
+    # +90h through +144h index files all 200, +147h+ 404s. The old 90h cap
+    # here was stale (see the docstring's postmortem in ecmwf_ifs.py).
     for run_hour in (6, 18):
         steps = available_forecast_steps(run_hour)
         assert steps[0] == 0
-        assert steps[-1] == 90
+        assert steps[-1] == 144
+        assert 96 in steps and 141 in steps  # past the old, wrong 90h cap
         assert 240 not in steps
-        assert 96 not in steps  # would be the next 3-hourly step past the cap
+        assert 147 not in steps  # would be the next 3-hourly step past the real cap
 
 
 def test_available_forecast_steps_rejects_bad_run_hour():
@@ -232,12 +236,12 @@ def test_target_steps_for_cycle_00z_12z_get_the_full_41_step_6_hourly_grid():
         assert steps[-1] == 240
 
 
-def test_target_steps_for_cycle_06z_18z_are_capped_at_90h():
+def test_target_steps_for_cycle_06z_18z_are_capped_at_144h():
     for run_hour in (6, 18):
         steps = target_steps_for_cycle(run_hour)
-        assert steps == tuple(range(0, 91, 6))
-        assert len(steps) == 16
-        assert steps[-1] == 90
+        assert steps == tuple(range(0, 145, 6))
+        assert len(steps) == 25
+        assert steps[-1] == 144
         assert 240 not in steps
 
 

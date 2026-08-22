@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from frontfinder.config.manifests import ALL_CLASSES, BEST_LOSS_MANIFEST, MODEL_1702_MANIFEST
+from frontfinder.config.manifests import ALL_CLASSES, THETA_E_UV_Q_MANIFEST, MODEL_1702_MANIFEST
 from frontfinder.ingest.ecmwf_ifs import FakeIFSFieldSource, IFSCycle
 from frontfinder.scheduler.run_cycle import ModelRunConfig, run_cycle, run_one_model
 
@@ -86,11 +86,11 @@ def test_run_one_model_does_not_write_latest_pointer(tiny_source, tmp_path):
 
 def test_run_cycle_runs_both_models_and_returns_both_paths(tiny_source, tmp_path):
     configs = [
-        ModelRunConfig(manifest=BEST_LOSS_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
+        ModelRunConfig(manifest=THETA_E_UV_Q_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
         ModelRunConfig(manifest=MODEL_1702_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
     ]
     results = run_cycle(configs, tiny_source, "2026-08-19", 6, str(tmp_path), steps=(0,))
-    assert set(results.keys()) == {"best_loss", "model_1702"}
+    assert set(results.keys()) == {"theta-e_uv_q", "model_1702"}
     for paths in results.values():
         assert len(paths) == 1
         assert paths[0].endswith(".zarr")
@@ -103,11 +103,11 @@ class AlwaysFailsPredictor:
 
 def test_run_cycle_continues_after_one_model_fails(tiny_source, tmp_path):
     configs = [
-        ModelRunConfig(manifest=BEST_LOSS_MANIFEST, predictor=AlwaysFailsPredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
+        ModelRunConfig(manifest=THETA_E_UV_Q_MANIFEST, predictor=AlwaysFailsPredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
         ModelRunConfig(manifest=MODEL_1702_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
     ]
     results = run_cycle(configs, tiny_source, "2026-08-19", 6, str(tmp_path), steps=(0,))
-    assert "best_loss" not in results
+    assert "theta-e_uv_q" not in results
     assert "model_1702" in results
 
 
@@ -173,18 +173,20 @@ def test_run_cycle_skips_a_failing_step_but_publishes_the_rest(tiny_source, tmp_
 
 
 def test_run_cycle_defaults_to_target_steps_for_cycle_when_steps_omitted(tiny_source, tmp_path):
-    # run_hour=18 -> capped at 90h/16 steps per ecmwf_ifs.target_steps_for_cycle;
-    # exercising the real default here (not just the fast-test steps=(...)
-    # override used elsewhere) would fetch 16 full inference passes, so this
-    # just checks the plumbing picks up SOME multi-step default rather than
-    # silently reverting to a single step=0 run.
+    # run_hour=18 -> capped at 144h/25 steps per ecmwf_ifs.target_steps_for_cycle
+    # (2026-08-22: corrected from a stale 90h/16-step assumption -- see that
+    # module's available_forecast_steps docstring); exercising the real
+    # default here (not just the fast-test steps=(...) override used
+    # elsewhere) would fetch 25 full inference passes, so this just checks
+    # the plumbing picks up SOME multi-step default rather than silently
+    # reverting to a single step=0 run.
     configs = [
         ModelRunConfig(manifest=MODEL_1702_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
     ]
     from frontfinder.ingest.ecmwf_ifs import target_steps_for_cycle
 
     expected_steps = target_steps_for_cycle(18)
-    assert len(expected_steps) == 16  # sanity: this is really exercising the multi-step default
+    assert len(expected_steps) == 25  # sanity: this is really exercising the multi-step default
 
     results = run_cycle(configs, tiny_source, "2026-08-19", 18, str(tmp_path))
-    assert len(results["model_1702"]) == 16
+    assert len(results["model_1702"]) == 25

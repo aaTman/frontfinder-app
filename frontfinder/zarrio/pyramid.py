@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 import xarray as xr
 import xproj  # noqa: F401 -- registers the `.proj` accessor used below
+import zarr
 from topozarr import Pyramid, create_pyramid
 
 from frontfinder.config.manifests import ModelManifest
@@ -102,5 +103,26 @@ def build_front_pyramid(fields: FrontFields, manifest: ModelManifest, n_levels: 
 
 
 def write_front_pyramid(pyramid: Pyramid, store_path: str) -> None:
-    """Write a topozarr pyramid to a zarr v3 store."""
+    """Write a topozarr pyramid to a zarr v3 store.
+
+    2026-08-22: followed by an explicit `zarr.consolidate_metadata()` call.
+    `datatree.to_zarr` already writes a `consolidated_metadata` block on
+    every group node, but leaves each one's `metadata` dict EMPTY --
+    confirmed live by inspecting a real written store's root `zarr.json`.
+    That's the same "not part of the Zarr v3 spec yet" limitation the
+    ZarrUserWarning at write time already flags (see test_run_cycle.py's
+    warnings), and it means the frontend's zarr client (`zarrita`, via
+    `@carbonplan/zarr-layer`'s `withMaybeConsolidatedMetadata`) can't
+    actually use it to skip per-array metadata fetches -- it still issues
+    one `zarr.json` GET per array per pyramid level it opens (up to 6
+    levels x 4 classes) before it can even start fetching data, all on the
+    critical path for first paint. Calling `consolidate_metadata()`
+    explicitly (confirmed live against a real store) correctly populates
+    the root's `consolidated_metadata.metadata` with every descendant
+    array's real shape/chunks/codecs, keyed by path (e.g. "0/cold"), which
+    the client library specifically looks for -- collapsing those N
+    metadata round-trips into the one root `zarr.json` fetch it makes
+    anyway.
+    """
     pyramid.datatree.to_zarr(store_path, encoding=pyramid.encoding, mode="w")
+    zarr.consolidate_metadata(store_path)

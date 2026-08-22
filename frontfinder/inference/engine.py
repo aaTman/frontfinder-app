@@ -48,11 +48,27 @@ class KerasPredictor:
 
     def predict_batch(self, patches: np.ndarray) -> np.ndarray:
         output = self._model.predict(patches, verbose=0)
-        # deep-supervision models (see sooner_ablations.yaml model_config) may
-        # return a list of outputs at different resolutions; the final,
-        # full-resolution head is the one used for serving.
+        # 2026-08-22 correction: this model's deep-supervision heads are
+        # named sup1..sup4 and were WRONGLY assumed to go
+        # coarsest-to-finest, with the finest ("full-resolution") head
+        # last -- so this used to take output[-1]. Directly measuring each
+        # head's actual spatial resolution against real assembled input
+        # (counting exact-duplicate rows/cols -- a nearest-neighbor
+        # upsample from a coarser decoder stage leaves whole rows/cols
+        # byte-identical) showed the opposite: sup1/sup2 are true full
+        # resolution (0 duplicate rows/cols out of 255), sup3 is
+        # half-resolution (2x2 blocks), and sup4 -- the one being served
+        # -- is quarter-resolution (4x4 blocks, i.e. ~1deg on this 0.25deg
+        # grid). That 4x4 block quantization is exactly the "wide, thin,
+        # flat bar" artifact reported near Bermuda: a real front gradient
+        # falling across one of sup4's crude 4x4 upsample block edges.
+        # UNet3+'s convention (this model's architecture, per its module
+        # name `unet_3plus_2D`) is sup1 = the main/finest decoder output,
+        # sup2..sup4 = auxiliary coarser heads added only to supervise
+        # intermediate decoder stages during training -- so output[0], not
+        # output[-1], is the one to serve.
         if isinstance(output, (list, tuple)):
-            output = output[-1]
+            output = output[0]
         return output
 
 

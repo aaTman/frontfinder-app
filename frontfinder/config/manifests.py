@@ -2,7 +2,7 @@
 frontfinder Keras model expects as input, in channel order.
 
 Sourced from Taylor's `fronts` repo configs:
-  - best_loss:   configs/sooner_ablations.yaml (originally n_channels: 30,
+  - theta-e_uv_q: configs/sooner_ablations.yaml (originally n_channels: 30,
                  levels confirmed by Taylor as [1000, 925, 850, 700, 500,
                  300]). potential_vorticity dropped 2026-08-20 -- no native
                  IFS open-data PV field exists to fetch (confirmed live,
@@ -156,8 +156,8 @@ class ModelManifest:
         return [self.all_classes.index(c) for c in self.served_classes]
 
 
-BEST_LOSS_MANIFEST = ModelManifest(
-    name="best_loss",
+THETA_E_UV_Q_MANIFEST = ModelManifest(
+    name="theta-e_uv_q",
     weights_filename="_best_loss.keras",
     variables=(
         VariableSpec("equivalent_potential_temperature", levels=(1000, 925, 850, 700, 500, 300)),
@@ -186,7 +186,7 @@ MODEL_1702_MANIFEST = ModelManifest(
 )
 
 MANIFESTS: dict[str, ModelManifest] = {
-    BEST_LOSS_MANIFEST.name: BEST_LOSS_MANIFEST,
+    THETA_E_UV_Q_MANIFEST.name: THETA_E_UV_Q_MANIFEST,
     MODEL_1702_MANIFEST.name: MODEL_1702_MANIFEST,
 }
 

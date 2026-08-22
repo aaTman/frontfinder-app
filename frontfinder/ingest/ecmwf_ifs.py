@@ -80,20 +80,29 @@ def available_forecast_steps(run_hour: int) -> tuple[int, ...]:
     """Which forecast lead times (hours) IFS open-data's 0.25deg "oper" HRES
     stream actually publishes for a given cycle run hour.
 
-    Confirmed against ECMWF's own open-data documentation (2026-08-21,
-    https://confluence.ecmwf.int/display/DAC/ECMWF+open+data:+real-time+forecasts+from+IFS+and+AIFS):
-    00Z/12Z cycles publish 0-144h at 3h steps, then 150-240h at 6h steps.
-    06Z/18Z cycles publish ONLY 0-90h at 3h steps -- there is no extended
-    range at all for the off-synoptic cycles. This is a real, permanent
-    asymmetry in what ECMWF publishes, not a pipeline limitation to work
-    around: `target_steps_for_cycle` below intersects the desired 6-hourly
-    grid against this per-run-hour ceiling rather than requesting steps
-    that will 404.
+    2026-08-22 correction (second pass, per Taylor): the prior version of
+    this function capped 00Z/12Z at 240h -- live-checking the AWS bucket
+    (and the official ecmwf source) confirms 00Z/12Z actually run out to
+    360h, 6-hourly from 150h on (confirmed live for 2026-08-20, steps
+    150-360h all 200). 06Z/18Z remain capped at 144h -- confirmed live
+    across two dates and both the `aws` and `ecmwf` sources that every
+    step from 150h-240h 404s for those cycles; per Taylor, this is because
+    IFS Cycle 50R1 folded the former `stream=scda` (short cutoff, 144h
+    ceiling) into `stream=oper` for 06Z/18Z, rather than 06Z/18Z gaining
+    scda's short range under oper -- there is no extended tail for them.
+    Real, live-confirmed shape: 00Z/12Z publish 0-144h at 3h steps then
+    150-360h at 6h steps (360h total); 06Z/18Z publish 0-144h at 3h steps
+    only (144h total). `target_steps_for_cycle` below intersects the
+    desired 6-hourly grid against this per-run-hour ceiling rather than
+    requesting steps that will 404 -- re-verify live (see
+    scripts/probe_ifs_native_pv.py-style direct bucket checks) before
+    trusting either boundary again; ECMWF has changed this shape more
+    than once already.
     """
     if run_hour in (0, 12):
-        return tuple(range(0, 145, 3)) + tuple(range(150, 241, 6))
+        return tuple(range(0, 145, 3)) + tuple(range(150, 361, 6))
     if run_hour in (6, 18):
-        return tuple(range(0, 91, 3))
+        return tuple(range(0, 145, 3))
     raise ValueError(f"run_hour must be one of 0/6/12/18, got {run_hour}")
 
 
@@ -103,7 +112,7 @@ def target_steps_for_cycle(
     """The subset of `desired` (default: every 6h to 240h) that this cycle's
     run hour actually publishes. For 00Z/12Z this is the full 41-step grid
     (every multiple of 6 up to 240h is a subset of what's published); for
-    06Z/18Z it's capped at 90h -- 16 steps (0, 6, ..., 90), never 240h."""
+    06Z/18Z it's capped at 144h -- 25 steps (0, 6, ..., 144), never 240h."""
     published = set(available_forecast_steps(run_hour))
     return tuple(s for s in desired if s in published)
 
@@ -219,6 +228,43 @@ class EcmwfOpenDataSource:
 
             self._client = Client(source=self._source)
         return self._client
+
+    def is_cycle_available(self, cycle: IFSCycle, probe_param: str = "2t") -> bool:
+        """HEAD-checks whether this cycle/step has been published on the
+        configured IFS open-data source, without downloading any data.
+        Used by the scheduler's `--poll` mode (scheduler/cli.py) to trigger
+        a run event-driven off actual availability instead of guessing a
+        fixed publish lag -- see the 2026-08-22 postmortem where a run
+        fired at exactly 7h and 404'd on every single step because the
+        whole cycle was still ~30min from landing.
+
+        Probes a single small single-level field (2m temperature) rather
+        than the fields this run actually needs: ECMWF publishes all params
+        for a given cycle/step together, so any one field's presence is a
+        reliable proxy for the whole step's.
+
+        Reuses the `ecmwf-opendata` client's own URL-building
+        (`_get_urls`), the same private method `Client.latest()` itself
+        HEAD-checks against -- so this works across whichever `source`
+        (aws/azure/google/ecmwf) the pipeline is configured for, rather
+        than hardcoding one replica's URL layout.
+        """
+        client = self._get_client()
+        request = dict(
+            date=cycle.date.replace("-", ""),
+            time=cycle.run_hour,
+            step=cycle.step,
+            stream="oper",
+            type="fc",
+            param=probe_param,
+        )
+        result = client._get_urls(request, use_index=False)
+        if not result.urls:
+            return False
+        return all(
+            client._robust(client.session.head)(url, verify=client.verify).status_code == 200
+            for url in result.urls
+        )
 
     @property
     def lat(self) -> np.ndarray:

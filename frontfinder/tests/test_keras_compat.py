@@ -65,10 +65,10 @@ def test_keras_predictor_loads_real_best_loss_weights_if_present(tmp_path, monke
     if not model_dir:
         pytest.skip("set FRONTFINDER_TEST_MODEL_DIR to a directory containing _best_loss.keras to run this")
 
-    from frontfinder.config.manifests import BEST_LOSS_MANIFEST
+    from frontfinder.config.manifests import THETA_E_UV_Q_MANIFEST
     from frontfinder.inference.engine import KerasPredictor
 
-    weights_path = os.path.join(model_dir, BEST_LOSS_MANIFEST.weights_filename)
+    weights_path = os.path.join(model_dir, THETA_E_UV_Q_MANIFEST.weights_filename)
     if not os.path.exists(weights_path):
         pytest.skip(f"{weights_path} not found")
 

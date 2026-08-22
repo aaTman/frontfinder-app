@@ -1,24 +1,24 @@
 // Pure, DOM-free logic shared by index.html and lib.test.js.
 //
-// Colors: colorblind-safe categorical order, validated 2026-08-21 with the
+// Colors: colorblind-safe categorical order, validated 2026-08-22 with the
 // dataviz skill's validate_palette.js against this app's dark legend/panel
 // surface (~#0f121a): `node scripts/validate_palette.js
-// "#3987e5,#d95926,#199e70,#c98500" --mode dark --surface "#0f121a"` passes
-// every check on the default adjacent-pair gate (worst adjacent CVD ΔE 8.4,
-// normal-vision ΔE 19.8). These are dark-column slots 1-4 (blue/orange/
-// aqua/yellow) of the skill's reference categorical palette, in the same
-// order -- swapped in for the old blue/red/green/purple set, whose
-// warm=red vs stationary=green pair is a classic deuteranopia collision.
-// The all-pairs gate (relevant for undifferentiated point clouds) fails at
-// 4 slots per the skill's own palette.md ("past three, fold to Other or
-// facet") -- accepted here because every class also carries a legend swatch
-// + text label + independent checkbox toggle, which is exactly the
-// "secondary encoding" the skill requires to accept the 6-8 CVD band.
+// "#3987e5,#d95926,#199e70,#9085e9" --mode dark --surface "#0f121a"` passes
+// every check on the default adjacent-pair gate (worst adjacent CVD ΔE 9.4,
+// normal-vision ΔE 24.6). These are dark-column slots 1, 2, 3, and 7 (blue/
+// orange/aqua/violet) of the skill's reference categorical palette --
+// occluded moved from slot 4 (yellow, #c98500) to slot 7 (violet) to read
+// as purple while keeping every check passing. The all-pairs gate (relevant
+// for undifferentiated point clouds) is not the applicable gate here per
+// the skill's own palette.md ("past three, fold to Other or facet") --
+// accepted because every class also carries a legend swatch + text label +
+// independent checkbox toggle, exactly the "secondary encoding" the skill
+// requires to accept the 6-8 CVD band.
 export const CLASS_STYLE = {
   cold: { color: "#3987e5", label: "Cold" },
   warm: { color: "#d95926", label: "Warm" },
   stationary: { color: "#199e70", label: "Stationary" },
-  occluded: { color: "#c98500", label: "Occluded" },
+  occluded: { color: "#9085e9", label: "Occluded" },
 };
 
 // Raw-probability breakpoints for the filled-contour look. See index.html's

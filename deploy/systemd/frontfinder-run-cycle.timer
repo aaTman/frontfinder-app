@@ -1,12 +1,18 @@
 [Unit]
-Description=Run frontfinder ~7h after each IFS synoptic cycle (00/06/12/18Z)
+Description=Poll for each IFS synoptic cycle (00/06/12/18Z) becoming available, run frontfinder as soon as it does
 
 [Timer]
-# Matches the `publish_lag_hours=7` default in scheduler/cli.py -- if you
-# tune one, tune the other. Randomized delay spreads load if this box ever
-# runs other scheduled jobs too.
-OnCalendar=*-*-* 07,13,19,01:00:00
-RandomizedDelaySec=300
+# 2026-08-22: replaced the old fixed "~7h after cycle time" firing
+# (OnCalendar=*-*-* 07,13,19,01:00:00, paired with scheduler/cli.py's
+# publish_lag_hours=7 default) after it fired at exactly 7h and 404'd on
+# every single step -- the cycle hadn't finished publishing until ~30min
+# later. Firing this often instead and letting `--poll` (see
+# scheduler/cli.py) HEAD-check real availability means the pipeline is
+# event-driven off ECMWF's actual publish time rather than a guessed lag.
+# Cheap to run this frequently: a poll that finds nothing new is a single
+# HEAD request and an immediate exit, not a real invocation.
+OnCalendar=*:0/5
+RandomizedDelaySec=30
 Persistent=true
 
 [Install]

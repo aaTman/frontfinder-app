@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from frontfinder.config.manifests import BEST_LOSS_MANIFEST
+from frontfinder.config.manifests import THETA_E_UV_Q_MANIFEST
 from frontfinder.inference.engine import KerasPredictor
 from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, assemble_model_input
 from frontfinder.scheduler.cli import most_recent_completed_cycle
@@ -46,13 +46,13 @@ def main() -> int:
     parser.add_argument("--patch-size", type=int, default=256)
     args = parser.parse_args()
 
-    weights_path = os.path.join(args.model_dir, BEST_LOSS_MANIFEST.weights_filename)
+    weights_path = os.path.join(args.model_dir, THETA_E_UV_Q_MANIFEST.weights_filename)
     predictor = KerasPredictor(weights_path)
     model = predictor._model
 
     print("=== 1. does the model's output change at all with the input? ===")
     p = args.patch_size
-    n = BEST_LOSS_MANIFEST.n_channels
+    n = THETA_E_UV_Q_MANIFEST.n_channels
     zeros_input = np.zeros((1, p, p, n), dtype=np.float32)
     random_input = np.random.default_rng(0).normal(size=(1, p, p, n)).astype(np.float32) * 50 + 100
     out_zeros = predictor.predict_batch(zeros_input)
@@ -101,8 +101,8 @@ def main() -> int:
     print("\n=== 3. fetching real input and comparing per-channel range vs normalization ===")
     cycle = most_recent_completed_cycle(datetime.now(timezone.utc))
     source = EcmwfOpenDataSource(cache_dir=args.ifs_cache_dir, source=args.ifs_source)
-    real_input = assemble_model_input(BEST_LOSS_MANIFEST, source, cycle)
-    names = BEST_LOSS_MANIFEST.channel_names()
+    real_input = assemble_model_input(THETA_E_UV_Q_MANIFEST, source, cycle)
+    names = THETA_E_UV_Q_MANIFEST.channel_names()
     if norm_layer is not None and scale_arr.size == len(names) and offset_arr.size == len(names):
         scale, offset = scale_arr, offset_arr
         # rescaled = (raw - stat_a) / (stat_b - stat_a) per the minmax formula

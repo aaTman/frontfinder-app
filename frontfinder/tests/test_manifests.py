@@ -3,7 +3,7 @@ import pytest
 from frontfinder.config.manifests import (
     ALL_CLASSES,
     SERVED_CLASSES,
-    BEST_LOSS_MANIFEST,
+    THETA_E_UV_Q_MANIFEST,
     MODEL_1702_MANIFEST,
     ModelManifest,
     VariableSpec,
@@ -11,14 +11,14 @@ from frontfinder.config.manifests import (
 )
 
 
-def test_best_loss_channel_count_matches_training_config():
+def test_theta_e_uv_q_channel_count_matches_training_config():
     # sooner_ablations.yaml originally listed n_channels: 30 (5 vars x 6
     # levels). potential_vorticity was dropped 2026-08-20 -- no native IFS
     # open-data PV field to fetch, and the isobaric-PV approximation had no
     # verified relationship to training's real ERA5-native PV.
     # equivalent_potential_temperature stays -- Taylor confirmed the
     # retrained _best_loss.keras still uses it. Now 4 vars x 6 levels = 24.
-    assert BEST_LOSS_MANIFEST.n_channels == 24
+    assert THETA_E_UV_Q_MANIFEST.n_channels == 24
 
 
 def test_model_1702_channel_count():
@@ -26,7 +26,7 @@ def test_model_1702_channel_count():
     assert MODEL_1702_MANIFEST.n_channels == 25
 
 
-def test_best_loss_channel_names_are_level_major_variable_minor_in_order():
+def test_theta_e_uv_q_channel_names_are_level_major_variable_minor_in_order():
     # Matches fronts/src/fronts/data/inputs.py's inputs_ds_to_dataarray():
     # pressure-level channels stack LEVEL-outer, VARIABLE-inner (every
     # variable at level[0], then every variable at level[1], ...) -- NOT
@@ -35,7 +35,7 @@ def test_best_loss_channel_names_are_level_major_variable_minor_in_order():
     # ecmwf_ifs.py's assemble_model_input docstring): it fed the model's
     # baked-in per-channel normalization stats to the wrong channels and
     # silently produced garbage (background-saturated) predictions.
-    names = BEST_LOSS_MANIFEST.channel_names()
+    names = THETA_E_UV_Q_MANIFEST.channel_names()
     assert names[0:4] == [
         "equivalent_potential_temperature_1000",
         "u_component_of_wind_1000",
@@ -89,13 +89,13 @@ def test_served_classes_excludes_dryline_and_background():
 
 
 def test_served_class_indices_align_with_all_classes_order():
-    idx = BEST_LOSS_MANIFEST.served_class_indices()
-    names_at_idx = [BEST_LOSS_MANIFEST.all_classes[i] for i in idx]
+    idx = THETA_E_UV_Q_MANIFEST.served_class_indices()
+    names_at_idx = [THETA_E_UV_Q_MANIFEST.all_classes[i] for i in idx]
     assert names_at_idx == list(SERVED_CLASSES)
 
 
 def test_get_manifest_looks_up_by_name():
-    assert get_manifest("best_loss") is BEST_LOSS_MANIFEST
+    assert get_manifest("theta-e_uv_q") is THETA_E_UV_Q_MANIFEST
     assert get_manifest("model_1702") is MODEL_1702_MANIFEST
 
 

@@ -21,7 +21,7 @@ Known risk areas going in (see EcmwfOpenDataSource's docstring):
      (edit CYCLE below) before assuming anything else is wrong.
   2. Not every variable is published at every pressure level in the 0.25deg
      feed -- specific humidity in particular sometimes drops out at the
-     uppermost levels. Stage 3 checks this per-level for best_loss's full
+     uppermost levels. Stage 3 checks this per-level for theta-e_uv_q's full
      6-level list.
   3. cfgrib needs a fresh `target` filename per distinct request or it will
      silently reuse a stale cached .grib2/.idx file -- if you rerun this
@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from frontfinder.config.manifests import BEST_LOSS_MANIFEST  # MODEL_1702_MANIFEST: disabled, see stage4
+from frontfinder.config.manifests import THETA_E_UV_Q_MANIFEST  # MODEL_1702_MANIFEST: disabled, see stage4
 from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, assemble_model_input
 from frontfinder.scheduler.cli import most_recent_completed_cycle
 
@@ -86,7 +86,7 @@ def stage2_one_pressure_level(source: EcmwfOpenDataSource) -> None:
 
 
 def stage3_all_levels_one_variable(source: EcmwfOpenDataSource, levels: list[int]) -> None:
-    print(f"\n=== stage 3: specific_humidity at every best_loss level {levels} ===")
+    print(f"\n=== stage 3: specific_humidity at every theta-e_uv_q level {levels} ===")
     for lvl in levels:
         arr = source.fetch_pressure_level("specific_humidity", lvl, CYCLE)
         describe(f"specific_humidity_{lvl}", arr)
@@ -102,7 +102,7 @@ def stage4_full_manifest_assembly(source: EcmwfOpenDataSource) -> None:
     # IFS open-data's 0.25deg feed doesn't publish (confirmed live,
     # 2026-08-20) -- this would fail identically every run until that gap
     # has a chosen resolution. See frontfinder/scheduler/cli.py.
-    for manifest in (BEST_LOSS_MANIFEST,):
+    for manifest in (THETA_E_UV_Q_MANIFEST,):
         print(f"  assembling {manifest.name} ({manifest.n_channels} channels)...")
         arr = assemble_model_input(manifest, source, CYCLE)
         describe(f"{manifest.name}_input", arr)

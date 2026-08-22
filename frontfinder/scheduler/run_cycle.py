@@ -12,8 +12,10 @@ cycle to a full forecast product -- every 6 hours out to 240 hours, per
 Taylor's call, prompted by the webapp having no time slider to show since
 there was never more than one time per cycle to slide over. See
 `ecmwf_ifs.py`'s `target_steps_for_cycle` for which steps a given cycle
-actually has available (00Z/12Z go to 240h, 06Z/18Z are capped at 90h --
-a real ECMWF publishing asymmetry, not a bug here). One zarr store is
+actually has available (00Z/12Z go to 240h, 06Z/18Z are capped at 144h --
+a real ECMWF publishing asymmetry, not a bug here; see that module's
+`available_forecast_steps` for the 2026-08-22 correction from an earlier,
+stale 90h assumption). One zarr store is
 written per (cycle, step) -- same flat 2D-per-store architecture as before,
 just one store per lead time instead of one store per cycle -- and
 `latest.json` now lists every step successfully produced for the CURRENT
@@ -155,7 +157,7 @@ def run_cycle(
 ) -> dict[str, list[str]]:
     """Runs every configured model across every step this cycle publishes
     (default: `target_steps_for_cycle(run_hour)`, i.e. every 6h out to 240h
-    where the run hour supports it, capped at 90h for 06Z/18Z -- see
+    where the run hour supports it, capped at 144h for 06Z/18Z -- see
     ecmwf_ifs.py). Steps run in ascending order; a failure on one step is
     logged and skipped rather than aborting the remaining steps for that
     model -- ECMWF publishes longer lead times progressively, so a longer

@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from frontfinder.config.manifests import ALL_CLASSES, BEST_LOSS_MANIFEST
+from frontfinder.config.manifests import ALL_CLASSES, THETA_E_UV_Q_MANIFEST
 from frontfinder.inference.engine import KerasPredictor
 from frontfinder.inference.tiling import generate_tiles, pad_to_multiple
 from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, assemble_model_input
@@ -46,7 +46,7 @@ def main() -> int:
 
     import os
 
-    weights_path = os.path.join(args.model_dir, BEST_LOSS_MANIFEST.weights_filename)
+    weights_path = os.path.join(args.model_dir, THETA_E_UV_Q_MANIFEST.weights_filename)
     predictor = KerasPredictor(weights_path)
 
     cycle = most_recent_completed_cycle(datetime.now(timezone.utc))
@@ -54,13 +54,13 @@ def main() -> int:
 
     print(f"cycle: {cycle}")
     print("assembling input...")
-    input_grid = assemble_model_input(BEST_LOSS_MANIFEST, source, cycle)
+    input_grid = assemble_model_input(THETA_E_UV_Q_MANIFEST, source, cycle)
     print(f"input_grid shape: {input_grid.shape}, dtype: {input_grid.dtype}")
 
     # Per-channel input stats: catches "one channel is garbage/wrong units"
     # before it even reaches the model.
     print(f"\n=== per-channel input stats (first/last 3 of {input_grid.shape[-1]}) ===")
-    names = BEST_LOSS_MANIFEST.channel_names()
+    names = THETA_E_UV_Q_MANIFEST.channel_names()
     for i in list(range(3)) + list(range(len(names) - 3, len(names))):
         ch = input_grid[..., i]
         print(f"    [{i:2d}] {names[i]:45s} min={np.nanmin(ch):.4g} max={np.nanmax(ch):.4g} mean={np.nanmean(ch):.4g}")

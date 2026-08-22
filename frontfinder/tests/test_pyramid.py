@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -93,3 +95,23 @@ def test_write_front_pyramid_roundtrips_through_zarr(small_fields, tmp_path):
         lvl0["cold"].values, small_fields.probabilities["cold"], atol=1e-5
     )
     assert lvl0["cold"].attrs["colormap"] == "blues"
+
+
+def test_write_front_pyramid_populates_consolidated_metadata(small_fields, tmp_path):
+    # 2026-08-22: `datatree.to_zarr` alone writes a `consolidated_metadata`
+    # block on every group node but leaves its `metadata` dict EMPTY (
+    # confirmed live against a real store) -- the frontend's zarr client
+    # needs it populated to skip a per-array metadata fetch per pyramid
+    # level per class on every page load. write_front_pyramid now follows
+    # the write with an explicit zarr.consolidate_metadata() call; this
+    # checks the root zarr.json actually ends up with real per-array
+    # entries (shape/chunk info), not just empty per-level placeholders.
+    pyramid = build_front_pyramid(small_fields, MODEL_1702_MANIFEST, n_levels=2)
+    store_path = str(tmp_path / "test_pyramid.zarr")
+    write_front_pyramid(pyramid, store_path)
+
+    with open(f"{store_path}/zarr.json") as f:
+        root = json.load(f)
+    consolidated = root["consolidated_metadata"]["metadata"]
+    assert "0/cold" in consolidated
+    assert consolidated["0/cold"]["shape"] == [64, 64]

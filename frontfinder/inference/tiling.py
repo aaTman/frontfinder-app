@@ -103,6 +103,43 @@ def blend_weight(patch_size: int, overlap: int) -> np.ndarray:
     return np.outer(ramp, ramp)
 
 
+def _ramp_vector(patch_size: int, left: int, right: int) -> np.ndarray:
+    """1D ramp for one tile along one axis: 1.0 in the interior, ramping down
+    to a small nonzero floor over `left`/`right` pixels at each edge -- where
+    `left`/`right` are this tile's *actual* overlap with its previous/next
+    neighbor along that axis (not a fixed assumed overlap), so the ramp
+    always exactly matches the real overlap band no matter how the tiling
+    snapped to the grid edge.
+    """
+    # Clamp so opposing ramps can never claim the same pixel (which would
+    # otherwise happen when a neighbor is snapped much closer than the
+    # nominal stride, e.g. the final edge tile on a non-evenly-divisible
+    # grid -- see the 2026-08-22 Bermuda-seam bug this replaces).
+    left = max(0, min(left, patch_size // 2))
+    right = max(0, min(right, patch_size - left))
+
+    ramp = np.ones(patch_size, dtype=np.float32)
+    if left > 0:
+        ramp[:left] = np.linspace(1.0 / left, 1.0, left, dtype=np.float32)
+    if right > 0:
+        ramp[patch_size - right:] = np.linspace(1.0, 1.0 / right, right, dtype=np.float32)
+    return ramp
+
+
+def _axis_ramps(starts: list[int], patch_size: int) -> dict[int, tuple[int, int]]:
+    """For each unique tile start along one axis, the actual (left, right)
+    overlap in pixels with its previous/next neighbor -- 0 at the outer
+    edges of the grid, `patch_size - gap` wherever tiles are `gap` apart.
+    """
+    ordered = sorted(set(starts))
+    ramps: dict[int, tuple[int, int]] = {}
+    for i, s in enumerate(ordered):
+        left = max(0, patch_size - (s - ordered[i - 1])) if i > 0 else 0
+        right = max(0, patch_size - (ordered[i + 1] - s)) if i < len(ordered) - 1 else 0
+        ramps[s] = (left, right)
+    return ramps
+
+
 def stitch(
     tiles: list[Tile],
     predictions: list[np.ndarray],
@@ -115,6 +152,21 @@ def stitch(
     `predictions[i]` has shape (patch_size, patch_size, n_classes) and
     corresponds to `tiles[i]`. Returns an (out_height, out_width, n_classes)
     array cropped to the original (unpadded) grid size.
+
+    Each tile's blend ramp is sized to its *actual* overlap with its
+    neighbors (see `_axis_ramps`), not the nominal `overlap` parameter --
+    `generate_tiles` snaps the final row/column of tiles to the grid edge,
+    which can leave a much smaller gap than the nominal stride (e.g. this
+    global 721x1440 grid's last two column tiles are only 64px apart, not
+    the nominal 224px stride). Using a fixed 32px ramp there left a
+    ~128-column band where both tiles report full (1.0) weight
+    simultaneously, so the stitch silently 50/50-averaged two independently
+    -run, differently-windowed predictions across a ~32deg-wide longitude
+    band -- visible as a wide, flat, structureless bar smeared over real
+    front structure (reported 2026-08-22: a bar straddling Bermuda, right on
+    that exact seam, ~64.75W). Sizing each tile's ramp to its real neighbor
+    distance guarantees adjacent tiles' full-weight interiors never
+    coincide, regardless of how the grid snaps.
     """
     if len(tiles) != len(predictions):
         raise ValueError("tiles and predictions must be the same length")
@@ -126,9 +178,11 @@ def stitch(
     padded_h = max(t.row_end for t in tiles)
     padded_w = max(t.col_end for t in tiles)
 
+    row_ramps = _axis_ramps([t.row_start for t in tiles], patch_size)
+    col_ramps = _axis_ramps([t.col_start for t in tiles], tiles[0].width)
+
     accum = np.zeros((padded_h, padded_w, n_classes), dtype=np.float64)
     weight_sum = np.zeros((padded_h, padded_w, 1), dtype=np.float64)
-    w = blend_weight(patch_size, overlap)[..., None]
 
     for tile, pred in zip(tiles, predictions):
         if pred.shape[:2] != (tile.height, tile.width):
@@ -136,6 +190,12 @@ def stitch(
                 f"prediction shape {pred.shape[:2]} does not match tile "
                 f"shape ({tile.height}, {tile.width})"
             )
+        row_left, row_right = row_ramps[tile.row_start]
+        col_left, col_right = col_ramps[tile.col_start]
+        w = np.outer(
+            _ramp_vector(tile.height, row_left, row_right),
+            _ramp_vector(tile.width, col_left, col_right),
+        )[..., None]
         accum[tile.row_start:tile.row_end, tile.col_start:tile.col_end, :] += (
             pred.astype(np.float64) * w
         )

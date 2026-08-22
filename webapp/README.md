@@ -49,18 +49,19 @@ round-tripping, tick-boundary/label generation, and the hover tooltip's
 pixel-to-alpha inversion.
 
 The 4 class colors (`#3987e5` cold / `#d95926` warm / `#199e70` stationary /
-`#c98500` occluded) replaced the original blue/red/green/purple set, which
+`#9085e9` occluded) replaced the original blue/red/green/purple set, which
 put warm=red next to stationary=green -- a classic deuteranopia collision.
-These are dark-mode slots 1-4 of the Claude Code `dataviz` skill's
-reference categorical palette, validated with that skill's
-`validate_palette.js` against this app's dark legend surface:
-`node scripts/validate_palette.js "#3987e5,#d95926,#199e70,#c98500" --mode
-dark --surface "#0f121a"` passes every check on the default adjacent-pair
-gate. It fails the stricter all-pairs gate (documented in the skill's own
-`palette.md` as expected past 3 slots) -- accepted here because every class
-also carries a legend swatch, a text label, and an independent checkbox
-toggle, which is the "secondary encoding" the skill requires to accept that.
-Re-run the validator if these colors ever change.
+These are dark-mode slots 1, 2, 3, and 7 of the Claude Code `dataviz`
+skill's reference categorical palette (occluded uses the violet slot so it
+reads as purple), validated with that skill's `validate_palette.js` against
+this app's dark legend surface: `node scripts/validate_palette.js
+"#3987e5,#d95926,#199e70,#9085e9" --mode dark --surface "#0f121a"` passes
+every check on the default adjacent-pair gate. It fails the stricter
+all-pairs gate (documented in the skill's own `palette.md` as expected past
+3 slots) -- accepted here because every class also carries a legend swatch,
+a text label, and an independent checkbox toggle, which is the "secondary
+encoding" the skill requires to accept that. Re-run the validator if these
+colors ever change.
 
 ## Known API-version caveat (read before touching colors)
 
@@ -105,7 +106,7 @@ have caught:
 
 1. A Caddy directive-ordering bug (`try_files` silently swallowing
    `/data/*` requests before `handle_path` ever saw them) that made the
-   frontend's `fetch("/data/best_loss/latest.json")` come back with the
+   frontend's `fetch("/data/theta-e_uv_q/latest.json")` come back with the
    webapp's own `index.html` instead of JSON -- see `deploy/Caddyfile`'s
    comment on the `handle {}` wrapping for the full story.
 2. The `colormap`/alpha issue described above.

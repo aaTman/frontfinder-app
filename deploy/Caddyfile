@@ -16,39 +16,70 @@
 }
 
 http://fronts.espr.ai {
-    # `handle_path` and `handle` here MUST both be `handle`-family blocks,
-    # evaluated in source order with first-match-wins semantics -- that's
-    # the only way /data/* reliably reaches the zarr store root instead of
-    # the webapp's fallback. Confirmed live (2026-08-21): with `try_files`
-    # as a bare top-level directive (the earlier version of this file),
-    # Caddy's *fixed* directive-execution order runs `try_files` before
-    # `handle_path` regardless of where each is written in the Caddyfile --
-    # so every request, including `/data/best_loss/latest.json`, hit
-    # try_files first, found no matching file under the webapp root, and
-    # silently rewrote to /index.html. The browser then tried to
-    # `JSON.parse()` the HTML shell it got back for latest.json:
-    # `SyntaxError: Unexpected token '<', "<!doctype "... is not valid
-    # JSON` -- which is what showed up in the console while the map sat on
-    # "loading..." forever. Wrapping the webapp's file_server + try_files in
-    # its own `handle {}` fixes it: handle/handle_path share one mutually-
-    # exclusive routing group, so /data/* is claimed by handle_path before
-    # the catch-all handle block ever runs try_files against it.
+	# `handle_path` and `handle` here MUST both be `handle`-family blocks,
+	# evaluated in source order with first-match-wins semantics -- that's
+	# the only way /data/* reliably reaches the zarr store root instead of
+	# the webapp's fallback. Confirmed live (2026-08-21): with `try_files`
+	# as a bare top-level directive (the earlier version of this file),
+	# Caddy's *fixed* directive-execution order runs `try_files` before
+	# `handle_path` regardless of where each is written in the Caddyfile --
+	# so every request, including `/data/best_loss/latest.json`, hit
+	# try_files first, found no matching file under the webapp root, and
+	# silently rewrote to /index.html. The browser then tried to
+	# `JSON.parse()` the HTML shell it got back for latest.json:
+	# `SyntaxError: Unexpected token '<', "<!doctype "... is not valid
+	# JSON` -- which is what showed up in the console while the map sat on
+	# "loading..." forever. Wrapping the webapp's file_server + try_files in
+	# its own `handle {}` fixes it: handle/handle_path share one mutually-
+	# exclusive routing group, so /data/* is claimed by handle_path before
+	# the catch-all handle block ever runs try_files against it.
 
-    # Zarr pyramid stores + latest.json pointers, written by
-    # frontfinder.scheduler.run_cycle on each IFS cycle. Served read-only,
-    # range-request support is on by default in Caddy's file_server.
-    handle_path /data/* {
-        root * /srv/frontfinder-app/output
-        file_server browse
-        header Cache-Control "public, max-age=60"   # short TTL: latest.json changes ~4x/day
-        header Access-Control-Allow-Origin "*"       # zarr-layer reads chunks via fetch()
-    }
+	# Zarr pyramid stores + latest.json pointers, written by
+	# frontfinder.scheduler.run_cycle on each IFS cycle. Served read-only,
+	# range-request support is on by default in Caddy's file_server.
+	handle_path /data/* {
+		root * /srv/frontfinder-app/output
+		file_server browse
+		header Access-Control-Allow-Origin "*" # zarr-layer reads chunks via fetch()
 
-    handle {
-        root * /srv/frontfinder-app/webapp
-        file_server
-        try_files {path} /index.html
-    }
+		# 2026-08-22: everything under a `<cycle>Z_f<step>.zarr/` directory
+		# is immutable once written -- each cycle+step gets its own
+		# uniquely-named store dir that's never rewritten, only pruned
+		# wholesale by retention.py -- so it's safe to cache indefinitely.
+		# This matters more than it looks: this box is reached via a
+		# Cloudflare Tunnel over a home connection (see the top-of-file
+		# comment), so a short TTL meant every pan/zoom/repeat-viewer
+		# re-fetched the same chunk bytes over that link instead of
+		# serving from cache.
+		#
+		# The two `header` blocks below MUST use mutually-exclusive
+		# matchers (`@zarrData` / `@notZarrData`), not one matched + one
+		# bare/unconditional -- Caddy's *fixed* directive-execution order
+		# (same pitfall as the handle_path/try_files comment above)
+		# flattens same-level `header` directives into separate sequential
+		# routes that all still run for a given request regardless of
+		# source order; a bare unconditional `header Cache-Control ...`
+		# after the matched one unconditionally overwrites it right back.
+		# Confirmed live: with an unconditional default, zarr chunk
+		# responses kept coming back `max-age=60` even after adding the
+		# `@zarrData`-matched immutable header above it.
+		@zarrData path *.zarr/*
+		header @zarrData Cache-Control "public, max-age=31536000, immutable"
 
-    encode gzip
+		@notZarrData not path *.zarr/*
+		header @notZarrData Cache-Control "public, max-age=60"
+	}
+
+	handle {
+		root * /srv/frontfinder-app/webapp
+		file_server
+		try_files {path} /index.html
+		encode gzip
+	}
+
+	# gzip scoped to the webapp handle block above, not applied to /data/*:
+	# zarr chunk payloads are already zstd-compressed by the zarr codec
+	# (see frontfinder/zarrio/pyramid.py), so a second gzip pass on them
+	# burns CPU on every request for no size benefit -- only the webapp's
+	# JS/HTML/CSS actually compress further.
 }

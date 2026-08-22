@@ -27,8 +27,8 @@ NOW = datetime(2026, 8, 21, 12, 0, 0, tzinfo=timezone.utc)
 
 def test_prune_old_output_stores_deletes_stores_older_than_cutoff(tmp_path):
     root = str(tmp_path)
-    old_store = _touch_store(root, "best_loss", "2026-08-01T00Z.zarr")  # 20 days old
-    new_store = _touch_store(root, "best_loss", "2026-08-20T18Z.zarr")  # 1 day old
+    old_store = _touch_store(root, "theta-e_uv_q", "2026-08-01T00Z.zarr")  # 20 days old
+    new_store = _touch_store(root, "theta-e_uv_q", "2026-08-20T18Z.zarr")  # 1 day old
 
     deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
 
@@ -39,8 +39,8 @@ def test_prune_old_output_stores_deletes_stores_older_than_cutoff(tmp_path):
 
 def test_prune_old_output_stores_never_deletes_latest_pointer(tmp_path):
     root = str(tmp_path)
-    pointer = _write_latest_pointer(root, "best_loss")
-    _touch_store(root, "best_loss", "2026-08-01T00Z.zarr")
+    pointer = _write_latest_pointer(root, "theta-e_uv_q")
+    _touch_store(root, "theta-e_uv_q", "2026-08-01T00Z.zarr")
 
     prune_old_output_stores(root, max_age_days=10, now=NOW)
 
@@ -49,7 +49,7 @@ def test_prune_old_output_stores_never_deletes_latest_pointer(tmp_path):
 
 def test_prune_old_output_stores_skips_unrecognized_names(tmp_path):
     root = str(tmp_path)
-    weird = os.path.join(root, "best_loss", "not_a_store_dir")
+    weird = os.path.join(root, "theta-e_uv_q", "not_a_store_dir")
     os.makedirs(weird)
 
     deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
@@ -60,13 +60,13 @@ def test_prune_old_output_stores_skips_unrecognized_names(tmp_path):
 
 def test_prune_old_output_stores_handles_multiple_models_independently(tmp_path):
     root = str(tmp_path)
-    old_best_loss = _touch_store(root, "best_loss", "2026-08-01T00Z.zarr")
+    old_theta_e_uv_q = _touch_store(root, "theta-e_uv_q", "2026-08-01T00Z.zarr")
     old_model_1702 = _touch_store(root, "model_1702", "2026-08-01T00Z.zarr")
     new_model_1702 = _touch_store(root, "model_1702", "2026-08-20T18Z.zarr")
 
     deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
 
-    assert sorted(deleted) == sorted([old_best_loss, old_model_1702])
+    assert sorted(deleted) == sorted([old_theta_e_uv_q, old_model_1702])
     assert os.path.exists(new_model_1702)
 
 
@@ -84,7 +84,7 @@ def test_prune_old_output_stores_boundary_is_exclusive_of_cutoff_day(tmp_path):
     # exactly 10 days old (cutoff == 2026-08-11) should NOT be deleted --
     # only strictly older than the cutoff is pruned.
     root = str(tmp_path)
-    boundary_store = _touch_store(root, "best_loss", "2026-08-11T00Z.zarr")
+    boundary_store = _touch_store(root, "theta-e_uv_q", "2026-08-11T00Z.zarr")
     deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
     assert deleted == []
     assert os.path.exists(boundary_store)
@@ -139,8 +139,8 @@ def test_prune_old_output_stores_recognizes_step_suffixed_names(tmp_path):
     # forecast product) -- this must be recognized as a valid, prunable name
     # just like the old step-less shape, not skipped as "unrecognized".
     root = str(tmp_path)
-    old = _touch_store(root, "best_loss", "2026-08-01T00Z_f006.zarr")  # 20 days old
-    new = _touch_store(root, "best_loss", "2026-08-20T18Z_f240.zarr")  # 1 day old
+    old = _touch_store(root, "theta-e_uv_q", "2026-08-01T00Z_f006.zarr")  # 20 days old
+    new = _touch_store(root, "theta-e_uv_q", "2026-08-20T18Z_f240.zarr")  # 1 day old
 
     deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
 
@@ -153,7 +153,7 @@ def test_prune_old_output_stores_still_recognizes_pre_multi_step_names(tmp_path)
     # legacy stores written before 2026-08-21 have no step suffix at all --
     # must still be prunable, not orphaned forever as "unrecognized".
     root = str(tmp_path)
-    old = _touch_store(root, "best_loss", "2026-08-01T00Z.zarr")
+    old = _touch_store(root, "theta-e_uv_q", "2026-08-01T00Z.zarr")
 
     deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
 

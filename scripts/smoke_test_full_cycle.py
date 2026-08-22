@@ -32,7 +32,7 @@ import time
 import numpy as np
 import xarray as xr
 
-from frontfinder.config.manifests import BEST_LOSS_MANIFEST
+from frontfinder.config.manifests import THETA_E_UV_Q_MANIFEST
 from frontfinder.inference.engine import KerasPredictor
 from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource
 from frontfinder.scheduler.cli import most_recent_completed_cycle
@@ -59,7 +59,7 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    weights_path = os.path.join(args.model_dir, BEST_LOSS_MANIFEST.weights_filename)
+    weights_path = os.path.join(args.model_dir, THETA_E_UV_Q_MANIFEST.weights_filename)
     if not os.path.exists(weights_path):
         print(f"!!! weights file not found: {weights_path}")
         print("    make sure _best_loss.keras is actually in --model-dir before running this")
@@ -78,7 +78,7 @@ def main() -> int:
     print(f"    model load: {time.monotonic() - t0:.1f}s, peak RSS so far: {peak_rss_mb():.0f} MB")
 
     run_config = ModelRunConfig(
-        manifest=BEST_LOSS_MANIFEST,
+        manifest=THETA_E_UV_Q_MANIFEST,
         predictor=predictor,
         patch_size=args.patch_size,
         overlap=args.overlap,
@@ -98,7 +98,7 @@ def main() -> int:
     lvl0 = dt["0"].to_dataset()
     print(f"    level 0 variables: {list(lvl0.data_vars)}")
     print(f"    level 0 dims: {dict(lvl0.sizes)}")
-    for cls in BEST_LOSS_MANIFEST.served_classes:
+    for cls in THETA_E_UV_Q_MANIFEST.served_classes:
         arr = lvl0[cls].values
         n_nan = int(np.isnan(arr).sum())
         print(

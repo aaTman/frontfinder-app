@@ -19,7 +19,7 @@ This script checks the live IFS open-data index the same way pressure
 levels were confirmed earlier (scripts/smoke_test_ecmwf.py's stage 3 /
 the earlier live-index level check): request `pv` on a pressure level and
 see whether it 404s or comes back with real data, on the same level set
-`best_loss` uses.
+`theta-e_uv_q` uses.
 
 Usage:
     cd /srv/frontfinder-app
@@ -81,7 +81,7 @@ def main() -> int:
     print()
     if found_any:
         print(
-            "IFS open-data DOES publish a native PV-like parameter on at least one of best_loss's "
+            "IFS open-data DOES publish a native PV-like parameter on at least one of theta-e_uv_q's "
             "levels. Next step: switch ecmwf_ifs.py to fetch it directly (add 'potential_vorticity' "
             "to DIRECT_PRESSURE_LEVEL_VARIABLES + ERA5_NAME_TO_IFS_SHORTNAME, drop the "
             "potential_vorticity_isobaric approximation) instead of approximating it -- this would "

@@ -76,3 +76,45 @@ def test_run_tiled_inference_batches_calls_to_predictor():
     run_tiled_inference(predictor, input_grid, MODEL_1702_MANIFEST, patch_size=256, overlap=32, batch_size=2)
     # every call except possibly the last should be exactly batch_size patches
     assert all(shape[0] <= 2 for shape in predictor.calls)
+
+
+def test_keras_predictor_serves_the_first_deep_supervision_head_not_the_last():
+    # Regression test for the 2026-08-22 "wide flat bar" bug: KerasPredictor
+    # used to take output[-1] on the (wrong) assumption that a deep
+    # -supervision model's LAST head is the finest/full-resolution one.
+    # Directly measuring the real _best_loss.keras model's four sup1..sup4
+    # heads against real assembled input showed the opposite -- sup1/sup2
+    # are full resolution, sup3 is half, and sup4 (what was being served)
+    # is quarter-resolution, a crude 4x4-block nearest-neighbor upsample
+    # from a much coarser decoder stage. That block quantization is what
+    # rendered as a wide, flat, structureless bar wherever a real front
+    # gradient crossed one of its block edges (reported near Bermuda).
+    # This builds a tiny synthetic model with the same sup1..sup4 shape
+    # (first head genuinely finer than the last) to pin the fix -- output[0]
+    # must be served, not output[-1] -- without needing the real weights
+    # file or TensorFlow-heavy training setup.
+    pytest.importorskip("keras")
+    import keras
+
+    from frontfinder.inference.engine import KerasPredictor
+
+    inputs = keras.Input(shape=(None, None, 3))
+    # sup1: full-resolution head (no pooling/upsampling in the path).
+    sup1 = keras.layers.Conv2D(2, 1, activation="softmax", name="sup1_softmax")(inputs)
+    # sup4: half-resolution features upsampled back with nearest-neighbor,
+    # the same block-quantizing operation the real model's coarser heads use.
+    pooled = keras.layers.MaxPooling2D(2)(inputs)
+    upsampled = keras.layers.UpSampling2D(2, interpolation="nearest")(pooled)
+    sup4 = keras.layers.Conv2D(2, 1, activation="softmax", name="sup4_softmax")(upsampled)
+    model = keras.Model(inputs=inputs, outputs=[sup1, sup4])
+
+    predictor = KerasPredictor.__new__(KerasPredictor)  # bypass load_model(); inject the model directly
+    predictor._model = model
+
+    rng = np.random.default_rng(0)
+    patch = rng.standard_normal((1, 16, 16, 3)).astype(np.float32)
+    served = predictor.predict_batch(patch)
+
+    plane = served[0, :, :, 0]
+    dup_rows = sum(1 for r in range(1, plane.shape[0]) if np.array_equal(plane[r], plane[r - 1]))
+    assert dup_rows == 0, "served output has duplicate rows -- picked the coarse head, not the fine one"
