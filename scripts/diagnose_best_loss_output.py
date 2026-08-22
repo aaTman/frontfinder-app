@@ -18,8 +18,8 @@ blaming the data), and report where in [0,1] the *front* classes' mass
 actually sits with more precision than 4 decimals.
 
 Usage:
-    cd /srv/frontfinder
-    uv run python scripts/diagnose_best_loss_output.py --model-dir /srv/frontfinder/models
+    cd /srv/frontfinder-app
+    uv run python scripts/diagnose_best_loss_output.py --model-dir /srv/frontfinder-app/models
 """
 
 from __future__ import annotations

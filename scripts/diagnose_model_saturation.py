@@ -20,8 +20,8 @@ This script isolates where:
      a normalization mismatch.
 
 Usage:
-    cd /srv/frontfinder
-    uv run python scripts/diagnose_model_saturation.py --model-dir /srv/frontfinder/models
+    cd /srv/frontfinder-app
+    uv run python scripts/diagnose_model_saturation.py --model-dir /srv/frontfinder-app/models
 """
 
 from __future__ import annotations

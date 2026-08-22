@@ -38,14 +38,14 @@ http://fronts.espr.ai {
     # frontfinder.scheduler.run_cycle on each IFS cycle. Served read-only,
     # range-request support is on by default in Caddy's file_server.
     handle_path /data/* {
-        root * /srv/frontfinder/output
+        root * /srv/frontfinder-app/output
         file_server browse
         header Cache-Control "public, max-age=60"   # short TTL: latest.json changes ~4x/day
         header Access-Control-Allow-Origin "*"       # zarr-layer reads chunks via fetch()
     }
 
     handle {
-        root * /srv/frontfinder/webapp
+        root * /srv/frontfinder-app/webapp
         file_server
         try_files {path} /index.html
     }

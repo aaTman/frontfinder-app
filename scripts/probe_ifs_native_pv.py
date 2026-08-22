@@ -22,7 +22,7 @@ see whether it 404s or comes back with real data, on the same level set
 `best_loss` uses.
 
 Usage:
-    cd /srv/frontfinder
+    cd /srv/frontfinder-app
     uv run python scripts/probe_ifs_native_pv.py
 """
 

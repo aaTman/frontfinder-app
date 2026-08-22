@@ -10,7 +10,7 @@ once the previous stage passes. If something fails, you'll know exactly
 which layer broke instead of guessing from one big traceback.
 
 Usage:
-    cd /srv/frontfinder
+    cd /srv/frontfinder-app
     uv run python scripts/smoke_test_ecmwf.py
 
 Known risk areas going in (see EcmwfOpenDataSource's docstring):

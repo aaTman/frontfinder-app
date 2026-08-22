@@ -12,11 +12,11 @@ trusting the systemd timer to run this unattended, not find out from a
 3am failure.
 
 Usage:
-    cd /srv/frontfinder
-    uv run python scripts/smoke_test_full_cycle.py --model-dir /srv/frontfinder/models
+    cd /srv/frontfinder-app
+    uv run python scripts/smoke_test_full_cycle.py --model-dir /srv/frontfinder-app/models
 
 Writes into --output-root (default: a throwaway /tmp dir, NOT
-/srv/frontfinder/output) so a smoke test never gets mistaken for a real
+/srv/frontfinder-app/output) so a smoke test never gets mistaken for a real
 published run by the webapp's latest.json lookup.
 """
 
@@ -68,7 +68,7 @@ def main() -> int:
     cycle = most_recent_completed_cycle(datetime.now(timezone.utc))
     print(f"cycle: {cycle}")
     print(f"weights: {weights_path}")
-    print(f"output root: {args.output_root} (throwaway -- separate from the real /srv/frontfinder/output)")
+    print(f"output root: {args.output_root} (throwaway -- separate from the real /srv/frontfinder-app/output)")
 
     t_start = time.monotonic()
 
