@@ -19,7 +19,48 @@
       border-radius: 10px; padding: 12px 14px; min-width: 240px;
       box-shadow: 0 4px 18px rgba(0,0,0,0.35);
     }
-    #panel h1 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
+    #panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
+    #panel h1 { font-size: 14px; margin: 0; font-weight: 600; }
+    #info-button {
+      flex: none; width: 18px; height: 18px; border-radius: 50%; padding: 0;
+      border: 1px solid #3a3f4d; background: #1c2130; color: #c8cbd6;
+      cursor: pointer; font-size: 11px; font-weight: 700; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      font-family: Georgia, "Times New Roman", serif;
+    }
+    #info-button:hover { background: #2a3040; }
+
+    /* 2026-08-24: info modal, added per Taylor's request -- paper link +
+       serving/model description. Plain centered overlay dialog rather than
+       another corner card since the content is long-form prose, not a
+       glanceable readout like #legend. */
+    #info-overlay {
+      position: fixed; inset: 0; z-index: 30; display: none;
+      background: rgba(6, 8, 12, 0.6);
+      align-items: center; justify-content: center;
+    }
+    #info-overlay.open { display: flex; }
+    #info-modal {
+      background: #12151f; color: #e6e8ee;
+      font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border-radius: 12px; padding: 20px 22px; max-width: 480px; width: calc(100% - 48px);
+      max-height: calc(100% - 48px); overflow-y: auto;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    }
+    #info-modal h2 { font-size: 16px; margin: 0 0 4px; font-weight: 600; }
+    #info-modal h3 { font-size: 12px; margin: 16px 0 4px; font-weight: 600; color: #9aa0b4; text-transform: uppercase; letter-spacing: 0.03em; }
+    #info-modal p { margin: 4px 0; }
+    #info-modal a { color: #6ea3ff; }
+    #info-modal ul { margin: 4px 0; padding-left: 18px; }
+    #info-modal li { margin: 2px 0; }
+    #info-modal .cite { color: #8b90a0; font-size: 11px; }
+    #info-close {
+      position: absolute; top: 14px; right: 16px;
+      background: none; border: none; color: #8b90a0; font-size: 18px;
+      cursor: pointer; line-height: 1; padding: 2px 4px;
+    }
+    #info-close:hover { color: #e6e8ee; }
+    #info-modal { position: relative; }
     /* .model-toggle styles removed along with the model-swap UI -- see the
        HTML comment near #class-toggles for why, and where to restore this
        when model_1702 comes back:
@@ -37,9 +78,21 @@
       margin-top: 10px; border-top: 1px solid #2a2f3d; padding-top: 10px;
       display: none; /* shown once a run with >1 step is loaded */
     }
-    #time-control input[type="range"] { width: 100%; accent-color: #3d6bff; }
     #time-label { font-size: 12px; display: flex; justify-content: space-between; }
     #time-label .lead { color: #8b90a0; }
+    /* 2026-08-23: play/pause button + slider row, per Taylor's reference
+       (https://madewithmaplibre.com/products/yr-no/). Slider needs
+       min-width: 0 to actually shrink inside the flex row instead of
+       blowing out #panel's width -- range inputs don't respect flex-basis
+       like other elements without it. */
+    #time-scrubber { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+    #time-scrubber input[type="range"] { flex: 1; min-width: 0; accent-color: #3d6bff; }
+    #play-button {
+      flex: none; width: 26px; height: 26px; border-radius: 50%; padding: 0;
+      border: 1px solid #3a3f4d; background: #1c2130; color: #e6e8ee;
+      cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center;
+    }
+    #play-button:hover { background: #2a3040; }
     #meta { margin-top: 10px; font-size: 11px; color: #8b90a0; border-top: 1px solid #2a2f3d; padding-top: 8px; }
     #meta.error { color: #ff8080; }
 
@@ -84,11 +137,11 @@
     .legend-tick-label:first-of-type { transform: translateX(0); }
     .legend-tick-label:last-of-type { transform: translateX(-100%); }
 
-    /* Approximate hover readout -- see the big comment above
-       estimateClassAlpha() in the module script for how "probability at
-       the cursor" is derived from the rendered pixel color rather than
-       decoded zarr data (Taylor's explicit "Approximate" choice). */
-    #hover-tooltip {
+    /* Click readout -- see updateClickTooltip() in the module script.
+       Queries the real decoded zarr values at the clicked point (via
+       ZarrLayer.queryData) rather than approximating from rendered pixel
+       color, and stays pinned at the last click until the next one. */
+    #click-tooltip {
       position: fixed; z-index: 20; pointer-events: none; display: none;
       background: rgba(15, 18, 26, 0.92); color: #e6e8ee;
       font: 12px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -100,7 +153,10 @@
 <body>
   <div id="map"></div>
   <div id="panel">
-    <h1>Fronts</h1>
+    <div id="panel-header">
+      <h1>Fronts</h1>
+      <button id="info-button" type="button" aria-label="About this model" title="About this model">i</button>
+    </div>
     <!-- Model-swap toggle removed for now: model_1702 is disabled pipeline-side
          (see frontfinder/scheduler/cli.py's build_run_configs docstring --
          its trained 950/900hPa levels aren't published by IFS open-data).
@@ -108,7 +164,10 @@
     <div id="class-toggles"></div>
     <div id="time-control">
       <div id="time-label"><span id="time-valid">--</span><span class="lead" id="time-lead">--</span></div>
-      <input type="range" id="time-slider" min="0" max="0" value="0" step="1" />
+      <div id="time-scrubber">
+        <button id="play-button" type="button" aria-label="Play">&#9654;</button>
+        <input type="range" id="time-slider" min="0" max="0" value="0" step="1" />
+      </div>
     </div>
     <div id="meta">loading…</div>
   </div>
@@ -122,7 +181,90 @@
       <div id="legend-body"></div>
     </div>
   </div>
-  <div id="hover-tooltip"></div>
+  <div id="click-tooltip"></div>
+
+  <div id="info-overlay">
+    <div id="info-modal" role="dialog" aria-modal="true" aria-labelledby="info-title">
+      <button id="info-close" type="button" aria-label="Close">&times;</button>
+      <h2 id="info-title">About this model</h2>
+      <p>
+        Fronts are detected by a convolutional neural network, specifically a
+        UNet 3+
+        (<a href="https://doi.org/10.1109/ICASSP40776.2020.9053405" target="_blank" rel="noopener">Huang et al. 2020</a>),
+        trained to predict the probability of a cold, warm, stationary, or
+        occluded front at each grid point. The original method and
+        evaluation are described in the paper published in
+        <em>Artificial Intelligence for the Earth Systems</em>:
+        <a href="https://doi.org/10.1175/AIES-D-24-0043.1" target="_blank" rel="noopener">
+          doi:10.1175/AIES-D-24-0043.1</a>.
+      </p>
+      <p>
+        The model served here was retrained after that paper was published,
+        with fewer input variables, different pressure levels, and a
+        different loss function than the ones described there. It was
+        trained on data through 2024.
+      </p>
+
+      <h3>Inputs</h3>
+      <p>
+        Equivalent potential temperature (&theta;<sub>e</sub>), u-wind,
+        v-wind, and specific humidity, each on six pressure levels (1000,
+        925, 850, 700, 500, and 300&nbsp;hPa), for 24 input channels total.
+      </p>
+
+      <h3>Loss function</h3>
+      <p>
+        The model is trained with a neighborhood Brier loss
+        (<a href="https://doi.org/10.1175/2007MWR2123.1" target="_blank" rel="noopener">Roberts and Lean 2008</a>;
+        <a href="https://doi.org/10.1175/MWR-D-22-0235.1" target="_blank" rel="noopener">Stein and Stoop 2024</a>).
+        Instead of scoring each pixel's predicted probability against the
+        exact labeled front location, the target is smoothed over a spatial
+        neighborhood, so a prediction placed close to a front is penalized
+        less than one placed far from any front. This suits a task where
+        even human analysts rarely agree on the exact placement of a front.
+      </p>
+      <p>
+        The neighborhood Brier loss remains a proper scoring rule
+        (<a href="https://doi.org/10.1198/016214506000001437" target="_blank" rel="noopener">Gneiting and Raftery 2007</a>):
+        a forecaster minimizes their expected loss only by reporting their
+        true belief about the probability of a front in that neighborhood,
+        with no incentive to hedge toward some other value. That property is
+        what lets the model's output be read directly as a probability
+        rather than as an arbitrary confidence score.
+      </p>
+
+      <h3>Data source</h3>
+      <p>
+        ECMWF IFS HRES (&ldquo;oper&rdquo;) forecasts at 0.25&deg; resolution, read
+        directly from the
+        <a href="https://registry.opendata.aws/ecmwf-forecasts/" target="_blank" rel="noopener">
+          ECMWF Open Data archive on AWS</a> (Amazon Web Services, <em>Registry of
+        Open Data: ECMWF Real-Time Forecasts</em>, s3://ecmwf-forecasts).
+      </p>
+
+      <h3>Update cadence</h3>
+      <p>
+        A poller checks every 5 minutes for each new IFS forecast cycle (00Z,
+        06Z, 12Z, 18Z) to start publishing, and runs inference on each lead
+        time as soon as ECMWF has actually published it. Lead times are
+        6-hourly only: 41 steps out to 240&nbsp;hours for 00Z/12Z cycles, and
+        25 steps out to 144&nbsp;hours for 06Z/18Z cycles. IFS itself
+        publishes some fields every 3&nbsp;hours out to 144h, but this
+        pipeline deliberately requests only the 6-hourly subset, so the map
+        never shows 3-hourly steps.
+      </p>
+
+      <h3>Serving</h3>
+      <p>
+        Inference runs on a home server: an Intel Core i7-4770 with
+        16&nbsp;GB of DDR3 RAM, no GPU. Each lead time is run as its own
+        tiled inference pass as soon as it becomes available, rather than as
+        one long batch job. A single step's run is capped at a 3-hour
+        timeout as a safety ceiling, well inside the 6-hour gap between IFS
+        cycles.
+      </p>
+    </div>
+  </div>
 
   <script type="importmap">
     {
@@ -140,13 +282,9 @@
       FRONT_DISCARD_BELOW,
       FRONT_BIN_WIDTH,
       FRONT_N_BINS,
-      hexToRgb01,
-      binForBandOpacity,
-      binLabel,
       frontBinBoundaries,
       labeledTickIndices,
       formatTickLabel,
-      estimateClassAlpha,
     } from "./lib.js";
 
     // -----------------------------------------------------------------
@@ -266,6 +404,10 @@
       // the preserved buffer; negligible at this map's scale.
       preserveDrawingBuffer: true,
     });
+    // Debugging aid: `map` is a module-scope binding, so it isn't reachable
+    // from the DevTools console (which evaluates in global/window scope)
+    // without this. Harmless to leave in permanently.
+    window.__map = map;
     let activeModel = "theta-e_uv_q";
     // The full step list for the currently-loaded cycle (see
     // resolveLatestRun below) -- fetched once per model load, not
@@ -300,17 +442,83 @@
     // fixed at 0.85 always; `visibility` alone controls what's actually
     // drawn (see setStepVisibility below).
     //
-    // Also added: an MRU cache with a small cap (MAX_CACHED_STEPS) so
-    // memory/texture count can't grow unbounded across a full 41-step
-    // cycle -- the least-recently-shown step's layers get removeLayer()'d
-    // (not just hidden) once the cap is exceeded.
+    // Also added: an MRU cache capped at MAX_CACHED_STEPS so GPU
+    // memory/texture count can't grow unbounded across a full cycle (up to
+    // ~40 steps) -- the least-recently-shown step's *GL layers* get
+    // removeLayer()'d (not just hidden) once the cap is exceeded.
+    //
+    // 2026-08-22: first tried uncapping this (Infinity) at the user's
+    // request so cycling back through valid times would never re-fetch.
+    // Confirmed live this was unsafe: scrubbing across ~20 steps (80 live
+    // custom GL layers/textures) drove the WebGL context into an error
+    // flood ("WebGL: too many errors, no more errors will be reported to
+    // the console for this context", from maplibre's globe projection
+    // code) -- consistent with the browser's GPU process running out of
+    // texture memory, which silently breaks rendering for resident layers
+    // (reported as steps' fronts "disappearing").
+    //
+    // The actual fix: eviction here only needs to be cheap to *reverse*,
+    // not avoided entirely -- Caddy serves every zarr store path
+    // (`.zarr/*`, see deploy/Caddyfile's @zarrData block) with
+    // `Cache-Control: public, max-age=31536000, immutable`, confirmed live
+    // via curl on both a store's zarr.json and a chunk. So a step's zarr
+    // metadata + chunk bytes are already indefinitely cached by the browser's
+    // own HTTP cache once fetched once -- evicting a step's GL layers here
+    // only discards GPU-side textures, not the underlying data. Rebuilding
+    // an evicted step is a local decode + re-upload from the HTTP cache, not
+    // a real network round trip, so a bounded cap gave "cycling back to any
+    // previously-visited step is fast," just without holding every step's
+    // textures on the GPU at once.
+    //
+    // 2026-08-23: uncapped again (Infinity) at Taylor's explicit request,
+    // this time to keep the whole cycle resident so the play button can
+    // loop indefinitely without ever re-showing a still-loading frame --
+    // knowingly reintroducing the exact WebGL texture-exhaustion risk
+    // described above (a full cycle can be ~41 steps / 164 live layers,
+    // well past the ~20-step/80-layer point where the browser's GPU
+    // process ran out of texture memory and rendering silently broke).
+    // If fronts start disappearing again during long playback loops, that
+    // failure mode is why -- lower this back down (16 was the last known
+    // stable value) or, better, replace this whole cache with one that
+    // reuses a fixed pool of GL layers and re-points their source per step
+    // instead of allocating new layers per step.
     let currentStepIndex = -1;
     const layersByStep = new Map(); // stepIndex -> Map(cls -> ZarrLayer); insertion order == LRU order (oldest first)
-    const MAX_CACHED_STEPS = 8;
+    const MAX_CACHED_STEPS = Infinity;
     // Debounces the slider's oninput -> showStep() path; see the big
     // comment in setupTimeSlider for why this exists.
     let pendingShowStepTimer = null;
     const SHOW_STEP_DEBOUNCE_MS = 120;
+
+    // 2026-08-23 fix (play button advancing before a frame's pixels have
+    // actually arrived): ZarrLayer's onLoadingStateChange is NOT a
+    // trustworthy "this class's chunk data is on screen" signal by itself.
+    // Traced through the (unminified via esm.sh) library source: adding a
+    // layer first runs its metadata phase (open the store, read array
+    // shapes) -- once that resolves, it kicks off the REAL chunk/pixel
+    // fetch fire-and-forget (not awaited) and, in the very same tick,
+    // flips `metadataLoading` back to false and fires
+    // onLoadingStateChange({loading:false, ...}) -- i.e. the "done
+    // loading" event we were gating on fires essentially the instant the
+    // pixel fetch *starts*, not when it finishes. Separately, the chunk
+    // fetch's own `chunksLoading` flag only ever flips true after an
+    // internal 80ms debounce (to avoid flashing a spinner for fast
+    // fetches) -- so a chunk fetch that resolves in under ~80ms toggles
+    // `chunksLoading` from false to false with NO event at all, meaning
+    // that fetch's actual completion is otherwise invisible to us.
+    // Net effect: every class was being marked "loaded" (and playback
+    // advanced) right as its real data started fetching, regardless of
+    // how long that fetch actually took.
+    //
+    // Fix: don't resolve a class the instant we see loading:false --
+    // arm a settle timer comfortably longer than the library's 80ms
+    // debounce first. If the library reports loading:true again before
+    // it fires (a slow-enough fetch actually got seen starting), the
+    // timer is cancelled and we wait for the next loading:false instead.
+    // Only a "no further loading activity for SETTLE_MS" quiet period
+    // counts as actually loaded -- see the onLoadingStateChange callback
+    // in buildStepLayers.
+    const SETTLE_MS = 150;
 
     // 2026-08-22: serializes *new* step builds (steps not already in
     // layersByStep), added because the debounce above only limits how often
@@ -341,7 +549,7 @@
     // Per-step load bookkeeping: which classes' chunks are still loading,
     // via ZarrLayer's onLoadingStateChange (see buildStepLayers). Also
     // doubles as eviction protection -- see evictOldCachedStepsIfNeeded.
-    const stepLoadState = new Map(); // stepIndex -> { pendingClasses: Set<cls>, loaded: bool }
+    const stepLoadState = new Map(); // stepIndex -> { pendingClasses: Set<cls>, loaded: bool, error: string|null, settleTimers: Map<cls, timerId> }
     // How many not-yet-visited neighboring steps to opportunistically
     // prefetch (hidden) once the current step's own fetches settle and the
     // browser is idle -- makes the single-step-at-a-time nudge of the
@@ -403,40 +611,20 @@
     }
 
     // -----------------------------------------------------------------
-    // Legend (bottom-right card) + approximate hover tooltip.
+    // Legend (bottom-right card) + click-to-query tooltip.
     // 2026-08-21, per Taylor's request + attached reference screenshot.
-    //
-    // The hover readout is deliberately "approximate" (Taylor's explicit
-    // choice via AskUserQuestion, over fetching/decoding the real zarr
-    // array data for exact values): it reads the ALREADY-RENDERED pixel
-    // color under the cursor via gl.readPixels and works backward to
-    // "which of the 10 discrete opacity bands (see FRONT_BIN_WIDTH etc.
-    // above) produced this color", rather than looking at the underlying
-    // probability data at all. This is fast and needs no new dependencies,
-    // but has real, known limitations, listed here rather than discovered
-    // later:
-    //   1. The Positron basemap isn't pure white -- water, parks, and some
-    //      roads carry their own faint color. Those can read as a faint,
-    //      spurious front probability. HOVER_ALPHA_MIN below is a blunt
-    //      filter for this (small apparent signal is dropped rather than
-    //      shown), tuned empirically -- adjust it if basemap false
-    //      positives or missed-faint-fronts turn out to be a problem.
-    //   2. When two classes' fronts genuinely overlap at the same pixel,
-    //      the blend is sequential ( each layer draws over what's already
-    //      there), not additive -- estimateClassAlpha treats each class
-    //      independently as if it were the only thing composited over a
-    //      white background, which is only exactly right when at most one
-    //      class is present at that pixel. Multi-class overlap will read
-    //      as approximately, not exactly, right.
-    // If this turns out to be too rough in practice, the real fix is
-    // reading the decoded zarr array values directly (the data ZarrLayer
-    // already has in memory) instead of re-deriving them from pixels --
-    // that was the "Exact" option Taylor passed on this round.
+    // 2026-08-23: switched from a continuous approximate hover readout
+    // (derived from rendered pixel color via gl.readPixels) to a
+    // click-triggered exact readout via ZarrLayer's queryData(), which
+    // reads the real decoded zarr value at a point. The pixel-color
+    // approach had two real bugs in practice: it could freeze on stale
+    // cursor positions (maplibre only fires "render" on repaint, so a
+    // reading could outlive the cursor leaving a front), and it reported
+    // wrong values wherever the Positron basemap's own faint tint (water,
+    // parks) or overlapping classes' sequential (non-additive) blending
+    // confused the pixel-color-to-probability inversion. queryData reads
+    // the underlying data directly, so neither failure mode applies.
     // -----------------------------------------------------------------
-
-    const CLASS_RGB = Object.fromEntries(
-      Object.entries(CLASS_STYLE).map(([cls, style]) => [cls, hexToRgb01(style.color)])
-    );
 
     // Colorbar: each class's band row gets a tick mark under every bin
     // boundary plus a numeric label under every other one, so the bands
@@ -491,112 +679,51 @@
       }
     }
 
-    // Below this estimated bandOpacity, treat the pixel as "no front here"
-    // rather than report a value -- see limitation (1) in the big comment
-    // above. Half of the smallest real bin step is a starting point, not a
-    // carefully-tuned constant. customClassFrag's bandOpacity only ever
-    // takes the values 1/FRONT_N_BINS, 2/FRONT_N_BINS, ..., 1 -- so the
-    // smallest real step between adjacent rendered values is
-    // 1/FRONT_N_BINS, not FRONT_BIN_WIDTH/FRONT_N_BINS (that divided by
-    // the bin *width*, 0.1, for no reason -- gave a threshold 10x too
-    // small, so faint basemap tint like water/parks was passing the
-    // filter and showing up as a spurious low-value reading).
-    const HOVER_ALPHA_MIN = (1 / FRONT_N_BINS) * 0.5;
-
-    let hoverGl = null;
-    function getHoverGl() {
-      if (hoverGl) return hoverGl;
-      const canvas = map.getCanvas();
-      hoverGl = canvas.getContext("webgl2") || canvas.getContext("webgl");
-      return hoverGl;
-    }
-    const hoverPixelBuf = new Uint8Array(4);
-
-    function hideHoverTooltip() {
-      document.getElementById("hover-tooltip").style.display = "none";
-      // Drop any in-flight rAF-scheduled read (see scheduleHoverUpdate
-      // below) so it can't reopen the tooltip after the cursor has left.
-      pendingHoverEvent = null;
+    function hideClickTooltip() {
+      document.getElementById("click-tooltip").style.display = "none";
     }
 
-    // gl.readPixels needs to run right after a real, complete paint, not
-    // off an independently-scheduled timer that could land mid-frame --
-    // hence hooking into maplibre's own "render" event (fires
-    // synchronously right after it finishes painting a frame) instead of
-    // requestAnimationFrame. But maplibre only paints on demand -- once
-    // the map is idle (nothing panning/zooming/loading), it stops firing
-    // "render" entirely. Just waiting on that event, as a first version
-    // of this fix did, meant the tooltip only ever updated when
-    // something ELSE happened to force a repaint (e.g. a click) --
-    // confirmed live: it wouldn't show at all until you clicked the map,
-    // then froze on that click's cursor position until the next click.
-    // The fix is to explicitly ask for a repaint on every mousemove via
-    // map.triggerRepaint() (cheap -- a no-op if one's already pending),
-    // which guarantees a "render" event actually follows shortly after,
-    // so the read the hover code depends on isn't left waiting on a
-    // repaint that would otherwise never come.
-    let pendingHoverEvent = null;
-    function scheduleHoverUpdate(e) {
-      pendingHoverEvent = e;
-      map.triggerRepaint();
-    }
-    map.on("render", () => {
-      if (pendingHoverEvent) updateHoverTooltip(pendingHoverEvent);
-    });
+    // Bumped on every click so a slow queryData() from an earlier click
+    // can't clobber a newer one if it resolves out of order.
+    let clickRequestId = 0;
 
-    function updateHoverTooltip(e) {
-      const tooltip = document.getElementById("hover-tooltip");
+    async function updateClickTooltip(e) {
+      const tooltip = document.getElementById("click-tooltip");
       if (currentStepIndex === -1) {
-        hideHoverTooltip();
+        hideClickTooltip();
         return;
       }
-      const gl = getHoverGl();
-      if (!gl) {
-        hideHoverTooltip();
-        return;
-      }
-      const canvas = map.getCanvas();
-      const dpr = window.devicePixelRatio || 1;
-      const x = Math.round(e.point.x * dpr);
-      const yTop = Math.round(e.point.y * dpr);
-      const y = canvas.height - yTop - 1; // GL's origin is bottom-left, the map's is top-left
-      if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
-        hideHoverTooltip();
-        return;
-      }
-      // gl.readPixels reads whatever framebuffer is currently bound in the
-      // context's state -- not necessarily the visible canvas backbuffer.
-      // This handler runs from a `mousemove` listener, outside maplibre's
-      // own render loop, so whatever framebuffer its renderer last left
-      // bound (its internal MSAA/offscreen target, not framebuffer 0) is
-      // whatever gets read otherwise. Confirmed live: without this bind,
-      // the readback was always (0,0,0) regardless of cursor position --
-      // which, fed through estimateClassAlpha, clamps to ~1 for every
-      // class (every class's direction vector from white has a positive
-      // dot product with the all-ones "diff" a black pixel produces),
-      // producing the same bogus 0.90-1.0 reading everywhere for every
-      // front. Binding the default framebuffer (id 0, i.e. the canvas
-      // itself) before reading fixes that.
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, hoverPixelBuf);
-      const pixelRgb01 = [hoverPixelBuf[0] / 255, hoverPixelBuf[1] / 255, hoverPixelBuf[2] / 255];
-
       const stepLayers = layersByStep.get(currentStepIndex);
-      const lines = [];
-      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
-        if (!classVisible.get(cls)) continue;
-        if (!stepLayers || !stepLayers.has(cls)) continue;
-        const alpha = estimateClassAlpha(pixelRgb01, CLASS_RGB[cls]);
-        const bandOpacity = alpha / 0.85; // undo the layer's fixed `opacity` multiply
-        if (bandOpacity < HOVER_ALPHA_MIN) continue;
-        const bin = binForBandOpacity(Math.min(1, bandOpacity));
-        lines.push(
-          `<span class="swatch" style="background:${style.color}"></span>${style.label}: ${binLabel(bin)}`
-        );
+      if (!stepLayers) {
+        hideClickTooltip();
+        return;
       }
+      const point = { type: "Point", coordinates: [e.lngLat.lng, e.lngLat.lat] };
+      const requestId = ++clickRequestId;
+
+      const results = await Promise.all(
+        Object.entries(CLASS_STYLE).map(async ([cls, style]) => {
+          if (!classVisible.get(cls) || !stepLayers.has(cls)) return null;
+          try {
+            // 'finest' so the reading doesn't depend on the current zoom's
+            // resolution level -- the point clicked should read the same
+            // value whether zoomed in or out.
+            const result = await stepLayers.get(cls).queryData(point, undefined, { level: "finest" });
+            const value = result[cls]?.[0];
+            return typeof value === "number" && Number.isFinite(value) ? { style, value } : null;
+          } catch {
+            return null; // layer removed/evicted mid-query, e.g. a fast step change
+          }
+        })
+      );
+      if (requestId !== clickRequestId) return; // superseded by a newer click
+
+      const lines = results
+        .filter((r) => r && r.value > 0)
+        .map((r) => `<span class="swatch" style="background:${r.style.color}"></span>${r.style.label}: ${(r.value * 100).toFixed(0)}%`);
 
       if (lines.length === 0) {
-        hideHoverTooltip();
+        hideClickTooltip();
         return;
       }
       tooltip.innerHTML = lines.join("<br>");
@@ -628,6 +755,7 @@
           // other cached step reads classVisible itself the next time
           // it's shown (see showStep/setStepVisibility below).
           setStepVisibility(currentStepIndex, true);
+          hideClickTooltip(); // last reading may include/omit this class's now-stale visibility
         });
         container.appendChild(row);
       }
@@ -682,6 +810,7 @@
       currentStepIndex = -1;
       buildingIndex = -1;
       pendingIndex = null;
+      hideClickTooltip(); // last reading belongs to a step/model that's gone
     }
 
     function formatLeadHours(h) {
@@ -711,7 +840,7 @@
       const storePath = absoluteStorePath(activeModel, step.store);
       const stepLayers = new Map();
       const pendingClasses = new Set(Object.keys(CLASS_STYLE));
-      stepLoadState.set(index, { pendingClasses, loaded: false });
+      stepLoadState.set(index, { pendingClasses, loaded: false, error: null, settleTimers: new Map() });
       for (const [cls, style] of Object.entries(CLASS_STYLE)) {
         const layer = new ZarrLayer({
           id: `fronts-${cls}-${index}`,
@@ -727,20 +856,48 @@
           colormap: [style.color, style.color],
           customFrag: customClassFrag(cls),
           opacity: 0.85,
-          // Fires (at least) once metadata + chunks finish loading, and
-          // again on any later loading-state change (e.g. panning in new
-          // chunks) -- the `info.loaded` guard below means only the first
-          // "done loading" transition ever advances the build queue /
-          // triggers prefetch, later firings are no-ops for that purpose.
+          // Fires on every loading-state change -- at least an initial
+          // metadata-phase true/false pair, plus (for slow enough chunk
+          // fetches) a later chunks true/false pair, plus any further
+          // firing from panning in new chunks. The `info.loaded` guard
+          // means only the first SETTLE_MS-quiet "done loading" ever
+          // advances the build queue / triggers prefetch; later firings
+          // are no-ops for that purpose.
+          //
+          // 2026-08-23 fix (play button advancing before pixels arrive /
+          // marching through missing data) -- see the big SETTLE_MS
+          // comment above for why a raw loading:false can't be trusted on
+          // its own. Also captures `state.error` (set when e.g. a step's
+          // zarr store 404s -- metadata fails fast, which used to look
+          // identical to a fast successful load) so onStepFullyLoaded /
+          // advancePlayback can stop playback on a step that never
+          // actually loaded instead of treating the failure as "done".
           onLoadingStateChange: (state) => {
-            if (state.loading) return;
             const info = stepLoadState.get(index);
             if (!info || info.loaded) return;
-            info.pendingClasses.delete(cls);
-            if (info.pendingClasses.size === 0) {
-              info.loaded = true;
-              onStepFullyLoaded(index);
+            if (state.error && !info.error) info.error = String(state.error);
+            const pending = info.settleTimers.get(cls);
+            if (pending !== undefined) clearTimeout(pending);
+            if (state.loading) {
+              info.settleTimers.delete(cls);
+              return;
             }
+            info.settleTimers.set(
+              cls,
+              setTimeout(() => {
+                info.settleTimers.delete(cls);
+                // Guards against this timer outliving its step (evicted
+                // from stepLoadState, or superseded by a fresh build for
+                // the same index) -- `!==` catches both since eviction
+                // deletes the entry and a rebuild sets a brand-new object.
+                if (stepLoadState.get(index) !== info || info.loaded) return;
+                info.pendingClasses.delete(cls);
+                if (info.pendingClasses.size === 0) {
+                  info.loaded = true;
+                  onStepFullyLoaded(index);
+                }
+              }, SETTLE_MS)
+            );
           },
         });
         map.addLayer(layer);
@@ -779,6 +936,22 @@
         pendingIndex = null;
         schedulePrefetchNeighbors(currentStepIndex);
       }
+      // Playback was waiting on this exact step to finish building (see
+      // advancePlayback) before it could schedule the next frame -- resume
+      // now that it's actually on screen. `index === currentStepIndex`
+      // excludes prefetch-neighbor completions, which aren't what's
+      // currently displayed. A step that failed to load (see the
+      // onLoadingStateChange comment above) stops playback here instead of
+      // arming the next frame -- otherwise this is exactly the path that
+      // let playback march straight through missing data.
+      if (isPlaying && index === currentStepIndex && playTimer === null) {
+        const info = stepLoadState.get(index);
+        if (info?.error) {
+          stopPlayback();
+        } else {
+          playTimer = setTimeout(advancePlayback, PLAY_INTERVAL_MS);
+        }
+      }
     }
 
     // Prefetches one not-yet-cached neighbor of `index` (hidden) once the
@@ -808,7 +981,9 @@
     // silently sitting on the previous step's frame.
     function refreshMeta() {
       const loading = buildingIndex === currentStepIndex || pendingIndex === currentStepIndex;
-      setMeta(`${MODELS[activeModel].label} · cycle ${activeCycleTime}${loading ? " · loading…" : ""}`);
+      const stepError = stepLoadState.get(currentStepIndex)?.error;
+      const suffix = loading ? " · loading…" : stepError ? " · no data for this step" : "";
+      setMeta(`${MODELS[activeModel].label} · cycle ${activeCycleTime}${suffix}`, Boolean(stepError));
     }
 
     function showStep(index) {
@@ -820,6 +995,7 @@
       // why this is `visibility` and not `opacity`.
       if (currentStepIndex !== -1 && currentStepIndex !== index) {
         setStepVisibility(currentStepIndex, false);
+        hideClickTooltip(); // last reading belongs to the step just hidden
       }
       currentStepIndex = index;
 
@@ -843,13 +1019,95 @@
       refreshMeta();
     }
 
+    // -----------------------------------------------------------------
+    // Play/pause animation through activeSteps, per Taylor's reference
+    // (https://madewithmaplibre.com/products/yr-no/).
+    //
+    // Advances are gated on the target step actually being on screen, not
+    // just a fixed wall-clock cadence -- advancePlayback() only arms the
+    // next PLAY_INTERVAL_MS timer immediately when the step it just
+    // showStep()'d to was already cached (layersByStep hit). If it wasn't
+    // (a fresh build was kicked off, or it got queued behind one already
+    // in flight -- see requestStepBuild/buildingIndex/pendingIndex above),
+    // no timer is armed here; onStepFullyLoaded resumes playback itself
+    // once that exact step's layers finish loading. So a slow/throttled
+    // fetch pauses the animation on the last fully-loaded frame instead of
+    // advancing over a half-loaded or still-previous frame.
+    // -----------------------------------------------------------------
+    let isPlaying = false;
+    let playTimer = null; // a setTimeout id -- see advancePlayback/onStepFullyLoaded
+    const PLAY_INTERVAL_MS = 700;
+
+    function stopPlayback() {
+      if (playTimer !== null) {
+        clearTimeout(playTimer);
+        playTimer = null;
+      }
+      isPlaying = false;
+      const btn = document.getElementById("play-button");
+      btn.innerHTML = "&#9654;";
+      btn.setAttribute("aria-label", "Play");
+    }
+
+    function advancePlayback() {
+      playTimer = null;
+      if (!isPlaying) return;
+      const next = (currentStepIndex + 1) % activeSteps.length;
+      document.getElementById("time-slider").value = String(next);
+      previewStepLabel(next);
+      showStep(next);
+      // NB: layersByStep.has(next) is NOT "next has finished loading" --
+      // buildStepLayers() inserts into layersByStep synchronously the
+      // moment a build *starts* (so the GL layer objects exist immediately
+      // for eviction/visibility bookkeeping), well before its chunks have
+      // actually arrived. stepLoadState is the one that only flips to
+      // `loaded: true` once every class's onLoadingStateChange has fired
+      // with loading:false -- that's the real "is this frame actually on
+      // screen yet" signal.
+      const nextState = stepLoadState.get(next);
+      if (nextState?.loaded) {
+        // Already fully loaded (cache hit) -- showStep() displayed it
+        // synchronously, so pace the next frame normally... unless that
+        // "load" was actually a cached failure (revisiting a step whose
+        // data doesn't exist, see the onLoadingStateChange comment above)
+        // -- then stop rather than looping straight through it again.
+        // Otherwise leave playTimer null; onStepFullyLoaded(next) arms it
+        // once the step that's actually now on screen finishes loading.
+        if (nextState.error) {
+          stopPlayback();
+        } else {
+          playTimer = setTimeout(advancePlayback, PLAY_INTERVAL_MS);
+        }
+      }
+    }
+
+    function startPlayback() {
+      if (activeSteps.length <= 1) return;
+      isPlaying = true;
+      const btn = document.getElementById("play-button");
+      btn.innerHTML = "&#10074;&#10074;";
+      btn.setAttribute("aria-label", "Pause");
+      advancePlayback();
+    }
+
+    function setupPlayButton() {
+      const btn = document.getElementById("play-button");
+      // Reassigned (not addEventListener) for the same reason as the
+      // slider's oninput/onchange below -- loadModel() can run more than
+      // once per page life.
+      btn.onclick = () => {
+        if (isPlaying) stopPlayback();
+        else startPlayback();
+      };
+    }
+
     function setupTimeSlider() {
       const control = document.getElementById("time-control");
       const slider = document.getElementById("time-slider");
       if (activeSteps.length <= 1) {
         // Nothing meaningful to slide over (e.g. a 06Z/18Z cycle that's
         // only gotten through step 0 so far) -- hide rather than show a
-        // slider that can't move.
+        // slider (and play button) that can't move.
         control.style.display = "none";
         return;
       }
@@ -879,6 +1137,7 @@
       // layer-build/fetch path in showStep is delayed until the thumb has
       // been still for SHOW_STEP_DEBOUNCE_MS.
       slider.oninput = (e) => {
+        if (isPlaying) stopPlayback(); // manual scrub takes over from autoplay
         const index = Number(e.target.value);
         previewStepLabel(index);
         if (pendingShowStepTimer !== null) clearTimeout(pendingShowStepTimer);
@@ -910,6 +1169,7 @@
       // there's only one enabled model -- see the panel's HTML comment --
       // but loadModel() is written to support more than one.)
       clearAllCachedLayers();
+      stopPlayback();
       if (pendingShowStepTimer !== null) {
         clearTimeout(pendingShowStepTimer);
         pendingShowStepTimer = null;
@@ -928,16 +1188,31 @@
       }
     }
 
+    function setupInfoModal() {
+      const overlay = document.getElementById("info-overlay");
+      const open = () => overlay.classList.add("open");
+      const close = () => overlay.classList.remove("open");
+      document.getElementById("info-button").addEventListener("click", open);
+      document.getElementById("info-close").addEventListener("click", close);
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close(); // click on the backdrop, not the modal itself
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && overlay.classList.contains("open")) close();
+      });
+    }
+
     buildClassToggles();
     buildLegend();
+    setupPlayButton();
+    setupInfoModal();
     document.getElementById("legend-hide").addEventListener("click", (e) => {
       const content = document.getElementById("legend-content");
       const hidden = content.style.display === "none";
       content.style.display = hidden ? "block" : "none";
       e.target.textContent = hidden ? "Hide" : "Show";
     });
-    map.on("mousemove", scheduleHoverUpdate);
-    map.on("mouseout", hideHoverTooltip);
+    map.on("click", updateClickTooltip);
     map.on("load", () => {
       // 2026-08-21: globe view (per Taylor -- see
       // https://hazard.degreeday.org/?layer=wildfire for the reference

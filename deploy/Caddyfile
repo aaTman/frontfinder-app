@@ -75,6 +75,18 @@ http://fronts.espr.ai {
 		file_server
 		try_files {path} /index.html
 		encode gzip
+
+		# 2026-08-22: this handle block previously set no Cache-Control at
+		# all, so it fell to whatever default caching Cloudflare applies at
+		# its edge for HTML -- confirmed live: `curl -sI` against
+		# fronts.espr.ai showed `cf-cache-status: HIT` serving a `last-
+		# modified` from well before the most recent on-disk edit, meaning a
+		# webapp code change here could sit invisible behind Cloudflare's
+		# edge cache for an unknown/unbounded time (bad for a page whose
+		# logic gets edited live). `no-store` (not just `no-cache`) so
+		# Cloudflare doesn't cache the response bytes at all, only a
+		# same-content revalidation.
+		header Cache-Control "no-store"
 	}
 
 	# gzip scoped to the webapp handle block above, not applied to /data/*:

@@ -91,6 +91,7 @@ def run_one_model(
         patch_size=run_config.patch_size,
         overlap=run_config.overlap,
         batch_size=run_config.batch_size,
+        lon_deg=source.lon,
     )
 
     probabilities = {

@@ -70,6 +70,44 @@ def test_run_tiled_inference_sends_only_16_multiple_patches_to_predictor():
     assert out.shape == (721, 1440, len(MODEL_1702_MANIFEST.served_classes))
 
 
+def test_run_tiled_inference_gives_seam_tiles_real_wrapped_context():
+    # Regression test for the 2026-08-23 prime-meridian seam: without
+    # circular padding, the tile(s) touching column 0 have no data from the
+    # grid's own opposite edge (lon=359.75) even though they're physically
+    # adjacent on the globe. Tag every pixel's first channel with its own
+    # longitude and check the tile(s) covering column 0 actually received
+    # values from the high end of the range (352.0+), not zero-padding.
+    height = 256
+    lon = np.linspace(0.0, 359.75, 1440)
+    n_channels = MODEL_1702_MANIFEST.n_channels
+    input_grid = np.zeros((height, 1440, n_channels), dtype=np.float32)
+    input_grid[:, :, 0] = lon[None, :]
+
+    all_rows: list[np.ndarray] = []
+
+    class SeamCapturingPredictor:
+        def predict_batch(self, patches: np.ndarray) -> np.ndarray:
+            n, h, w, _ = patches.shape
+            all_rows.extend(patches[i, 0, :, 0] for i in range(n))
+            return np.zeros((n, h, w, len(ALL_CLASSES)), dtype=np.float32)
+
+    run_tiled_inference(
+        SeamCapturingPredictor(), input_grid, MODEL_1702_MANIFEST,
+        patch_size=256, overlap=32, lon_deg=lon,
+    )
+
+    # find a tile that has both a high-longitude pixel (from the wrap-pad)
+    # and, at the very next column, lon=0 -- i.e. the seam's two physically
+    # adjacent longitudes ended up adjacent in a single tile, proving the
+    # tile got real context across the wrap rather than a synthetic zero.
+    found_continuous_wrap = any(
+        row[j] >= 352.0 and row[j + 1] == 0.0
+        for row in all_rows
+        for j in range(len(row) - 1)
+    )
+    assert found_continuous_wrap, "no tile saw lon=352..360 immediately followed by lon=0 -- seam wasn't wrapped"
+
+
 def test_run_tiled_inference_batches_calls_to_predictor():
     predictor = ConstantPredictor(n_classes=len(ALL_CLASSES))
     input_grid = np.zeros((512, 512, MODEL_1702_MANIFEST.n_channels), dtype=np.float32)

@@ -75,7 +75,36 @@ def test_relative_vorticity_matches_analytic_shear():
     earth_radius_m = 6_371_000.0
     dx = earth_radius_m * np.cos(np.deg2rad(lat))[:, None] * dlon_rad
     expected = np.broadcast_to(1.0 / dx, zeta.shape)  # dv/d(index) == 1 everywhere for this linear ramp
-    np.testing.assert_allclose(zeta, expected, rtol=1e-6)
+    # relative_vorticity treats longitude as periodic (production always
+    # calls it with the full global 0..359.75deg grid, where column -1 and
+    # column 0 really are adjacent -- see the 2026-08-23 prime-meridian PV
+    # seam fix), so the first/last columns of this non-global 0..10deg test
+    # slice legitimately wrap onto each other rather than matching the
+    # interior's uniform-ramp analytic value; only the interior is checked
+    # against the pure-shear formula here.
+    np.testing.assert_allclose(zeta[:, 1:-1], expected[:, 1:-1], rtol=1e-6)
+
+
+def test_relative_vorticity_wraps_across_the_prime_meridian():
+    # A full global-span grid, matching how production always calls this
+    # (source.lon is always the full 0..359.75deg IFS grid) -- v is a single
+    # sinusoid in longitude, so d(v)/d(lon) has a known analytic form
+    # continuously across the lon=0/360 seam, including at the array edges.
+    lat = np.linspace(30.0, 40.0, 5)
+    n_lon = 1440
+    lon = np.linspace(0.0, 360.0, n_lon, endpoint=False)
+    lon_rad = np.deg2rad(lon)
+    u = np.zeros((5, n_lon))
+    v = np.tile(np.sin(lon_rad), (5, 1))
+    zeta = relative_vorticity(u, v, lat, lon)
+
+    earth_radius_m = 6_371_000.0
+    # d(sin(lon_rad))/dx == cos(lon_rad) / (R * cos(lat)) -- the discretization
+    # (dlon_rad in the finite-difference numerator and in dx) cancels exactly.
+    expected = np.cos(lon_rad)[None, :] / (earth_radius_m * np.cos(np.deg2rad(lat))[:, None])
+    # Edge columns (0 and -1) must match the interior formula too -- that's
+    # exactly the periodic-wrap behavior the prime-meridian fix restores.
+    np.testing.assert_allclose(zeta, expected, rtol=1e-3, atol=1e-9)
 
 
 def test_relative_vorticity_rejects_shape_mismatch():

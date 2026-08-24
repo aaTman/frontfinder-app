@@ -124,14 +124,26 @@ def relative_vorticity(
 
     lat_rad = np.deg2rad(lat_deg)
     dlat = np.gradient(lat_rad)
-    dlon = np.gradient(np.deg2rad(lon_deg))
+    # Longitude is periodic (this is a global 0..359.75deg grid, so column
+    # -1 is physically adjacent to column 0 at the prime meridian) -- use
+    # the grid's uniform spacing directly rather than np.gradient's
+    # edge-aware spacing array, since that value feeds the periodic
+    # dv_dx difference below.
+    dlon = np.deg2rad(float(lon_deg[1] - lon_deg[0]))
 
     dy = EARTH_RADIUS_M * dlat  # meters per grid step, per row
     cos_lat = np.cos(lat_rad)
     cos_lat_safe = np.where(np.abs(cos_lat) < 1e-6, 1e-6, cos_lat)
-    dx = EARTH_RADIUS_M * cos_lat_safe[:, None] * dlon[None, :]  # meters per grid step, per (row, col)
+    dx = EARTH_RADIUS_M * cos_lat_safe * dlon  # meters per grid step, per row
 
-    dv_dx = np.gradient(v, axis=1) / dx
+    # 2026-08-23 fix (prime-meridian PV seam report): np.gradient(v, axis=1)
+    # defaults to a one-sided difference at columns 0 and -1, which is wrong
+    # here -- those columns are adjacent on the globe, not a real edge. That
+    # produced a spurious dv/dx discontinuity at the prime meridian on EVERY
+    # row, propagating into potential_vorticity (a model input channel) and
+    # showing up as a seam spanning nearly the full latitude range. np.roll
+    # wraps the centered difference around the longitude axis instead.
+    dv_dx = (np.roll(v, -1, axis=1) - np.roll(v, 1, axis=1)) / (2.0 * dx[:, None])
     du_dy = np.gradient(u, axis=0) / dy[:, None]
     return dv_dx - du_dy
 

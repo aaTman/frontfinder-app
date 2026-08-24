@@ -312,7 +312,26 @@ class EcmwfOpenDataSource:
             if levelist:
                 request["levelist"] = levelist
             self._get_client().retrieve(**request)
-        return xr.open_dataset(target, engine="cfgrib")
+        ds = xr.open_dataset(target, engine="cfgrib")
+        # 2026-08-22 fix (Taylor's Seattle-front report): the raw GRIB's
+        # native grid starts at longitude 180.0 (confirmed live via
+        # eccodes: longitudeOfFirstGridPointInDegrees=180.0, scanning
+        # positively), so cfgrib decodes `longitude` as -180..179.75, NOT
+        # the 0..359.75 this class's `self._lon` declares. Every
+        # fetch_pressure_level/fetch_single_level call used to hand back
+        # `da.values` POSITIONALLY -- i.e. column 0 of the array, silently
+        # assumed to be lon=0 (matching self._lon), actually held the data
+        # for lon=-180/180. That's a silent half-globe (720-column, 180deg)
+        # roll between the values every channel was assembled from and the
+        # `lon` coordinate the whole pipeline (and the webapp) tags them
+        # with -- e.g. a pixel labeled 237.7degE (Seattle) was actually
+        # populated from 57.75degE (Kazakhstan). Normalizing to 0..359.75
+        # and sorting here makes the returned dataset's `longitude` axis
+        # actually match `self._lon` before any `.values` positional read
+        # happens downstream.
+        if "longitude" in ds.coords:
+            ds = ds.assign_coords(longitude=(ds.longitude % 360)).sortby("longitude")
+        return ds
 
     def fetch_pressure_level(self, variable: str, level_hpa: int, cycle: IFSCycle) -> np.ndarray:
         key = ("pl", variable, level_hpa, cycle.date, cycle.run_hour, cycle.step)
