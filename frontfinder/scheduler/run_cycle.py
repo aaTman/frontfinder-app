@@ -48,7 +48,27 @@ class ModelRunConfig:
     manifest: ModelManifest
     predictor: Predictor
     patch_size: int = 256
-    overlap: int = 32
+    # 2026-08-26: raised from 32 -- with a 256px patch and 32px overlap, the
+    # row-tile seam between the first two latitude tiles (row_start=0 and
+    # row_start=224 on the real 721-row global grid) landed at ~26-34N, and
+    # every tile in that band is right at its OWN edge there too (both
+    # tiles' 32px blend ramps meet exactly at that seam). Real production
+    # output confirmed this as a persistent, weather-independent ridge in
+    # served "stationary" front probability pinned at 33.25N across every
+    # checked forecast cycle (8 independent real cycles, real weather
+    # varying substantially between them, same latitude every time) --
+    # reported as a fake stationary front. A real-model comparison run
+    # (2026-08-25 18Z cycle) showed the seam's excess probability shrinks
+    # sharply as overlap widens (32 -> 96 moved the local excess from
+    # roughly 2x the surrounding trend down to a small fraction of it),
+    # because a wider overlap band keeps the two tiles' shared crossover
+    # point further from each tile's own degraded edge. 96 was chosen as
+    # the point past which returns visibly diminish (128 wasn't much
+    # better) while only roughly doubling per-step CPU inference time
+    # (~11s -> ~24s on this box) -- worth it against the 240h x 41-step
+    # forecast product's several-hour cycle window. Tune down if compute
+    # budget gets tight, back up if the seam is still visible.
+    overlap: int = 96
     batch_size: int = 8
     n_pyramid_levels: int = 6
 
