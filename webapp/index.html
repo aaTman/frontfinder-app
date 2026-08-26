@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Fronts — ESPR</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <!-- v5, not v4: globe projection (map.setProjection below) doesn't exist
        in maplibre-gl@4 at all -- confirmed against the real v4.7.1
        dist/maplibre-gl.d.ts (no `setProjection`/`ProjectionSpecification`)
@@ -11,9 +12,125 @@
        globe view. -->
   <link href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet" />
   <style>
-    html, body, #map { height: 100%; margin: 0; background: #0b0e14; }
+    /* 2026-08-24: top nav bar mimicking espr.ai's own site-nav, added per
+       Taylor's request. Colors/fonts/breakpoint pulled directly from
+       espr.ai's shipped BaseLayout.css (--black/--text/--muted/--hairline/
+       --rose, "Helvetica Neue" stack, 760px collapse) rather than
+       approximated, so this page reads as the same site as the parent
+       espr.ai. Unlike espr.ai's own hero pages (.site-nav with no .solid,
+       position:absolute over a transparent hero), this page has no hero to
+       overlay -- the map fills the whole viewport underneath the panel/
+       legend cards -- so the bar here is always the ".solid"-equivalent:
+       a real fixed-height bar with a solid background and a bottom
+       hairline, and #map/#panel are pushed down by --nav-height so nothing
+       sits underneath it. */
+    :root {
+      --nav-height: 110px; /* overwritten by JS once the real (clamp-based) nav height is known -- see the measurement script below */
+      --black: #07070c; --nav-text: #edeae6; --nav-muted: #8e8d98;
+      --hairline: #232331; --rose: #e9afc0;
+      --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    }
+    /* Was #0b0e14 -- a different, mismatched dark shade from espr.ai's own
+       --black (#07070c). The nav has no background color of its own on
+       espr.ai (see .site-nav below) -- it just shows the body's color
+       through, so body has to actually BE that color for the nav to look
+       like it "inherits" the page background instead of sitting on top of
+       a visibly different-toned slab. */
+    html, body, #map { height: 100%; margin: 0; background: var(--black); }
+    #map { position: absolute; top: var(--nav-height); left: 0; right: 0; bottom: 0; height: auto; }
+    .site-nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+      font-family: var(--font-sans);
+    }
+    /* box-sizing: espr.ai's global.css sets `* { box-sizing: border-box }`
+       site-wide, which this page never did. Without it, .nav-inner's
+       padding was being ADDED on top of min-height instead of included in
+       it (content-box default), inflating the bar to ~179px instead of the
+       real ~110px -- that was the actual "wrong shape/aspect ratio" bug,
+       not the padding/font values themselves (those already matched). */
+    .site-nav, .site-nav * { box-sizing: border-box; }
+    /* Sizing (padding, gaps, font sizes) copied verbatim from espr.ai's
+       .nav-inner/.home/.nav-links rules in BaseLayout.css. min-height
+       mirrors espr.ai's own `calc(42px + 2*clamp(24px,3.2vw,34px))` (42px
+       ~= this button-row's intrinsic height), so the bar's proportions
+       track viewport width the same way theirs do; JS below reads the
+       rendered height into --nav-height since clamp() can't be replicated
+       as a static var. */
+    /* espr.ai's nav content sits inside its shared .wrap (max-width:1100px,
+       centered) with a nav-specific horizontal padding override -- this
+       page skipped .wrap entirely and put full-viewport-width padding
+       directly on .nav-inner, so on anything wider than 1100px the links
+       ran all the way out to the screen edges instead of stopping in a
+       centered column like the rest of the site.
+       .wrap and .nav-inner apply to the SAME element here (real markup is
+       `<div class="wrap nav-inner">`), and both declare `padding` --
+       .nav-inner's `padding: <v> 0` must come first so .wrap's rule, later
+       in source order at equal specificity, is the one that wins for
+       left/right (espr.ai's own stylesheet relies on this same ordering,
+       just split across longhand padding-left/right instead of shorthand). */
+    .site-nav .nav-inner {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: clamp(12px, 3vw, 24px);
+      min-height: calc(42px + 2 * clamp(24px, 3.2vw, 34px));
+      padding: clamp(24px, 3.2vw, 34px) 0;
+    }
+    .site-nav .wrap {
+      max-width: 1100px; margin: 0 auto;
+      padding-left: clamp(18px, 4vw, 40px);
+      padding-right: clamp(18px, 4vw, 40px);
+    }
+    .site-nav .home {
+      color: var(--nav-text); white-space: nowrap; font-size: clamp(13px, 1.4vw, 14px);
+      text-decoration: none;
+    }
+    .site-nav .home:hover { color: var(--rose); }
+    .site-nav .nav-toggle {
+      display: none; border: 1px solid var(--hairline); width: 42px; height: 42px;
+      color: var(--nav-text); cursor: pointer; background: #07070cb8; border-radius: 999px;
+      flex-direction: column; justify-content: center; align-items: center; gap: 4px; padding: 0;
+    }
+    .site-nav .nav-toggle:hover { border-color: var(--rose); }
+    .site-nav .nav-toggle span { background: currentColor; width: 18px; height: 1.5px; display: block; }
+    .site-nav .nav-toggle[aria-expanded="true"] span:nth-child(1) { transform: translateY(5.5px) rotate(45deg); }
+    .site-nav .nav-toggle[aria-expanded="true"] span:nth-child(2) { opacity: 0; }
+    .site-nav .nav-toggle[aria-expanded="true"] span:nth-child(3) { transform: translateY(-5.5px) rotate(-45deg); }
+    .site-nav .nav-links { flex-wrap: nowrap; align-items: center; gap: clamp(12px, 3vw, 32px); display: flex; }
+    .site-nav .nav-links a {
+      color: var(--nav-muted); white-space: nowrap; font-size: clamp(13px, 1.4vw, 14px); text-decoration: none;
+    }
+    .site-nav .nav-links a:hover, .site-nav .nav-links a[aria-current="page"] { color: var(--nav-text); }
+    .site-nav .nav-dropdown { position: relative; }
+    .site-nav .nav-dropdown-toggle {
+      font: inherit; font-size: clamp(13px, 1.4vw, 14px); line-height: inherit; color: var(--nav-muted); cursor: pointer;
+      background: none; border: none; margin: 0; padding: 0;
+    }
+    .site-nav .nav-dropdown-toggle:hover,
+    .site-nav .nav-dropdown-toggle[aria-current="page"],
+    .site-nav .nav-dropdown-toggle[aria-expanded="true"] { color: var(--nav-text); }
+    .site-nav .nav-dropdown-menu {
+      border: 1px solid var(--hairline); opacity: 0; pointer-events: none;
+      background: #07070cf5; border-radius: 12px; flex-direction: column; gap: 8px;
+      min-width: 130px; padding: 12px; transition: opacity .15s, transform .15s;
+      display: flex; position: absolute; top: calc(100% + 10px); left: 0;
+      transform: translateY(-6px) scale(.98); box-shadow: 0 20px 50px #00000059;
+    }
+    .site-nav .nav-dropdown.is-open .nav-dropdown-menu {
+      opacity: 1; pointer-events: auto; transform: translateY(0) scale(1);
+    }
+    @media (width <= 760px) {
+      .site-nav .nav-toggle { display: inline-flex; }
+      .site-nav .nav-links {
+        border: 1px solid var(--hairline); opacity: 0; pointer-events: none;
+        background: #07070cf5; border-radius: 12px; flex-direction: column; gap: 10px;
+        min-width: 140px; padding: 14px; transition: opacity .15s, transform .15s;
+        display: flex; position: absolute; top: calc(100% + 8px); right: 14px;
+        transform: translateY(-6px) scale(.98); box-shadow: 0 20px 50px #00000059;
+      }
+      .site-nav .nav-links.is-open { opacity: 1; pointer-events: auto; transform: translateY(0) scale(1); }
+      .site-nav .nav-links a { padding: 2px 0; }
+    }
     #panel {
-      position: absolute; top: 12px; left: 12px; z-index: 10;
+      position: absolute; top: calc(var(--nav-height) + 12px); left: 12px; z-index: 10;
       background: rgba(15, 18, 26, 0.88); color: #e6e8ee;
       font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       border-radius: 10px; padding: 12px 14px; min-width: 240px;
@@ -104,7 +221,7 @@
        row itself showing the 10 discrete opacity bands from
        customClassFrag rather than one continuous gradient. */
     #legend {
-      position: absolute; bottom: 12px; right: 12px; z-index: 10;
+      position: absolute; bottom: 40px; right: 12px; z-index: 10;
       background: rgba(15, 18, 26, 0.88); color: #e6e8ee;
       font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       border-radius: 10px; padding: 10px 12px; min-width: 200px;
@@ -151,6 +268,110 @@
   </style>
 </head>
 <body>
+  <nav class="site-nav">
+    <div class="wrap nav-inner">
+      <a class="home" href="https://espr.ai/">Taylor Mandelbaum</a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav-menu" aria-label="Toggle navigation">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="nav-links" id="site-nav-menu">
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-toggle" type="button" aria-expanded="false" aria-current="page">Projects</button>
+          <div class="nav-dropdown-menu">
+            <a href="https://fronts.espr.ai" aria-current="page">Fronts</a>
+          </div>
+        </div>
+        <a href="https://espr.ai/about/">About</a>
+        <a href="https://espr.ai/blog/">Writing</a>
+        <a href="https://espr.ai/resume/">Resume/CV</a>
+      </div>
+    </div>
+  </nav>
+  <script>
+    // Verbatim from espr.ai's own Nav.astro (aaTman/espr_website), so this
+    // page's nav behaves identically to the parent site's.
+    (function () {
+      const navs = document.querySelectorAll(".site-nav");
+
+      navs.forEach((nav) => {
+        const toggle = nav.querySelector(".nav-toggle");
+        const menu = nav.querySelector(".nav-links");
+
+        if (!toggle || !menu) return;
+
+        const closeMenu = () => {
+          toggle.setAttribute("aria-expanded", "false");
+          menu.classList.remove("is-open");
+        };
+
+        toggle.addEventListener("click", () => {
+          const isOpen = toggle.getAttribute("aria-expanded") === "true";
+
+          if (isOpen) {
+            closeMenu();
+          } else {
+            toggle.setAttribute("aria-expanded", "true");
+            menu.classList.add("is-open");
+          }
+        });
+
+        menu.querySelectorAll("a").forEach((link) => {
+          link.addEventListener("click", closeMenu);
+        });
+
+        document.addEventListener("click", (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          if (!nav.contains(target)) closeMenu();
+        });
+
+        window.addEventListener("resize", () => {
+          if (window.innerWidth > 760) closeMenu();
+        });
+
+        const dropdown = nav.querySelector(".nav-dropdown");
+        const dropdownToggle = nav.querySelector(".nav-dropdown-toggle");
+
+        if (dropdown && dropdownToggle) {
+          const closeDropdown = () => {
+            dropdownToggle.setAttribute("aria-expanded", "false");
+            dropdown.classList.remove("is-open");
+          };
+
+          dropdownToggle.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const isOpen = dropdownToggle.getAttribute("aria-expanded") === "true";
+
+            if (isOpen) {
+              closeDropdown();
+            } else {
+              dropdownToggle.setAttribute("aria-expanded", "true");
+              dropdown.classList.add("is-open");
+            }
+          });
+
+          document.addEventListener("click", (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            if (!dropdown.contains(target)) closeDropdown();
+          });
+        }
+      });
+
+      // Keeps --nav-height (used to offset #map/#panel below the bar) equal
+      // to the bar's real rendered height. Needed because .nav-inner's
+      // height comes from clamp()d padding, not a fixed value, so it can't
+      // be hardcoded as a static var -- it changes with viewport width.
+      const nav = document.querySelector(".site-nav");
+      if (nav) {
+        const syncNavHeight = () => {
+          document.documentElement.style.setProperty("--nav-height", `${nav.offsetHeight}px`);
+        };
+        new ResizeObserver(syncNavHeight).observe(nav);
+        syncNavHeight();
+      }
+    })();
+  </script>
   <div id="map"></div>
   <div id="panel">
     <div id="panel-header">
@@ -483,6 +704,11 @@
     // reuses a fixed pool of GL layers and re-points their source per step
     // instead of allocating new layers per step.
     let currentStepIndex = -1;
+    // 2026-08-25: the step whose layers are actually visible on the map
+    // right now, as opposed to `currentStepIndex` (the step the UI/playback
+    // *wants* shown, which may still be mid-fetch). Kept separate so a step
+    // change never has a window with nothing on screen -- see revealStep().
+    let visibleStepIndex = -1;
     const layersByStep = new Map(); // stepIndex -> Map(cls -> ZarrLayer); insertion order == LRU order (oldest first)
     const MAX_CACHED_STEPS = Infinity;
     // Debounces the slider's oninput -> showStep() path; see the big
@@ -579,6 +805,85 @@
       }
     }
 
+    // Swaps on-screen visibility to `index`'s layers -- and only to
+    // `index`'s layers -- the moment they're actually ready to show.
+    // Whatever was visible before stays visible until `index`'s layers have
+    // actually painted at least once (see the GL_WARMUP_FRAMES comment
+    // below), so there's never a frame with nothing (or a half-loaded step)
+    // on screen between one step and the next; see showStep/
+    // onStepFullyLoaded for the two places this gets called once `index` is
+    // confirmed ready.
+    //
+    // 2026-08-25: a network/decode-complete signal (stepLoadState.loaded)
+    // is NOT the same as "this layer has actually been painted." Traced
+    // through MapLibre's own source (unpkg maplibre-gl@5, unminified names
+    // aside): for a *custom* layer (what ZarrLayer is), both the offscreen
+    // pass (which calls the layer's `prerender()` -- confirmed via
+    // grep, ZarrLayer's prerender() is where it calls
+    // `this.regionRenderer.update(this.map, this.gl)`, its actual GPU-side
+    // tile/texture work) and the main translucent-pass `render()` call are
+    // gated on `!layer.isHidden()` in the painter's per-layer render loop --
+    // a hidden custom layer's prerender/render are simply never invoked, no
+    // matter how many chunks have already arrived over the network. So
+    // every layer we kept hidden while "loading" (deliberately, to avoid
+    // showing a half-fetched frame) had done *zero* GPU-side work by the
+    // time we flipped it visible -- the reveal frame was always its first
+    // real paint, cold. That's what was flashing blank on every single
+    // step, regardless of how long showStep/onStepFullyLoaded waited
+    // beforehand.
+    //
+    // Fix: keep the outgoing step visible for a couple of real animation
+    // frames after the incoming step is marked visible, so MapLibre
+    // actually calls the incoming layers' prerender()/render() (warming up
+    // regionRenderer) before the outgoing ones disappear. The two layers
+    // are both visible (overlapping, translucent) for those couple of
+    // frames -- a brief color-mix, not a blank map -- then the old one
+    // hides once the new one has had real paint calls.
+    const GL_WARMUP_FRAMES = 2;
+
+    function revealStep(index) {
+      const previous = visibleStepIndex;
+      setStepVisibility(index, true);
+      visibleStepIndex = index;
+      if (previous !== -1 && previous !== index) {
+        // MapLibre renders on demand, not continuously -- without forcing
+        // it here, a static/idle map could fire exactly one "render" event
+        // (from the setStepVisibility mutation just above) and then go
+        // quiet, leaving `previous` visible forever. triggerRepaint()
+        // forces the next frame each time until GL_WARMUP_FRAMES is hit.
+        let framesSeen = 0;
+        const onRender = () => {
+          framesSeen++;
+          if (framesSeen < GL_WARMUP_FRAMES) {
+            map.triggerRepaint();
+            return;
+          }
+          map.off("render", onRender);
+          // Only hide `previous` if nothing else has taken over as the
+          // visible step in the meantime (a fast run of reveals) -- each
+          // call's own `previous` is independent, so this just guards
+          // against a stale hide, not against `previous` itself changing.
+          setStepVisibility(previous, false);
+        };
+        map.on("render", onRender);
+        map.triggerRepaint();
+      }
+      // The time label/slider position move here too, not in showStep() --
+      // otherwise (e.g. during autoplay) the displayed time races ahead of
+      // the frame actually on screen, showing a valid_time that doesn't
+      // match what's rendered yet. Manual slider dragging still gets
+      // immediate label feedback via previewStepLabel (see setupTimeSlider)
+      // -- that's a deliberate exception for drag responsiveness, separate
+      // from this reveal-gated update.
+      const step = activeSteps[index];
+      if (step) {
+        document.getElementById("time-valid").textContent = step.valid_time;
+        document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
+      }
+      document.getElementById("time-slider").value = String(index);
+      hideClickTooltip(); // last reading belongs to whatever was visible before
+    }
+
     // Removes the least-recently-shown cached step(s) once the cache
     // exceeds MAX_CACHED_STEPS -- `layersByStep`'s insertion order is kept
     // as LRU order (showStep() re-inserts a step on every cache hit to
@@ -598,7 +903,7 @@
     function evictOldCachedStepsIfNeeded() {
       for (const [index, stepLayers] of layersByStep) {
         if (layersByStep.size <= MAX_CACHED_STEPS) break;
-        if (index === currentStepIndex || index === buildingIndex) continue;
+        if (index === currentStepIndex || index === visibleStepIndex || index === buildingIndex) continue;
         const state = stepLoadState.get(index);
         if (state && !state.loaded) continue;
         for (const cls of stepLayers.keys()) {
@@ -689,11 +994,14 @@
 
     async function updateClickTooltip(e) {
       const tooltip = document.getElementById("click-tooltip");
-      if (currentStepIndex === -1) {
+      // Reads whatever's actually on screen (visibleStepIndex), not
+      // currentStepIndex -- that can be a step still mid-fetch, whose
+      // layers exist but have no real data to query yet.
+      if (visibleStepIndex === -1) {
         hideClickTooltip();
         return;
       }
-      const stepLayers = layersByStep.get(currentStepIndex);
+      const stepLayers = layersByStep.get(visibleStepIndex);
       if (!stepLayers) {
         hideClickTooltip();
         return;
@@ -751,10 +1059,12 @@
         `;
         row.querySelector("input").addEventListener("change", (e) => {
           classVisible.set(cls, e.target.checked);
-          // Only the currently-visible step needs updating live -- every
+          // Only the actually-visible step needs updating live -- every
           // other cached step reads classVisible itself the next time
-          // it's shown (see showStep/setStepVisibility below).
-          setStepVisibility(currentStepIndex, true);
+          // it's shown (see showStep/setStepVisibility below). Uses
+          // visibleStepIndex, not currentStepIndex, since the target step
+          // may still be mid-fetch and not the one on screen yet.
+          setStepVisibility(visibleStepIndex, true);
           hideClickTooltip(); // last reading may include/omit this class's now-stale visibility
         });
         container.appendChild(row);
@@ -808,6 +1118,7 @@
       layersByStep.clear();
       stepLoadState.clear();
       currentStepIndex = -1;
+      visibleStepIndex = -1;
       buildingIndex = -1;
       pendingIndex = null;
       hideClickTooltip(); // last reading belongs to a step/model that's gone
@@ -831,10 +1142,9 @@
     // Builds one step's 4 class ZarrLayers and caches them under `index`.
     // Only called for steps not already in layersByStep -- see
     // requestStepBuild for the gate that keeps at most one of these
-    // in flight at a time. Visibility is set immediately based on whether
-    // `index` is (still) the current step, so a queued build that resolves
-    // after the user has moved on stays hidden rather than flashing onto
-    // the map before the next build gets a turn.
+    // in flight at a time. Starts hidden regardless of whether `index` is
+    // the current target step -- see revealStep() for why the swap is
+    // deferred until this step's data has actually settled.
     function buildStepLayers(index) {
       const step = activeSteps[index];
       const storePath = absoluteStorePath(activeModel, step.store);
@@ -904,7 +1214,12 @@
         stepLayers.set(cls, layer);
       }
       layersByStep.set(index, stepLayers);
-      setStepVisibility(index, currentStepIndex === index);
+      // Always starts hidden, even if `index` is the current target step --
+      // its chunks haven't arrived yet, so showing it now would flash a
+      // blank/half-loaded frame. revealStep() (called from
+      // onStepFullyLoaded once this step's data actually settles) is what
+      // makes it visible, and only then.
+      setStepVisibility(index, false);
       evictOldCachedStepsIfNeeded();
     }
 
@@ -927,6 +1242,13 @@
     // user has settled -- opportunistically prefetches a neighboring step.
     function onStepFullyLoaded(index) {
       if (buildingIndex === index) buildingIndex = -1;
+      // Only swap what's on screen if `index` is still what's actually
+      // wanted -- a build that resolves after the user/playback already
+      // moved on (this is a stale/prefetch completion) must stay hidden.
+      // Reveals even on a load error (state.error) since that's this
+      // step's terminal state either way -- refreshMeta below is what
+      // surfaces "no data for this step" once it's showing.
+      if (index === currentStepIndex) revealStep(index);
       refreshMeta();
       if (pendingIndex !== null && pendingIndex !== index) {
         const next = pendingIndex;
@@ -990,32 +1312,37 @@
       const step = activeSteps[index];
       if (!step) return;
 
-      // Hide (not remove) whatever step is currently showing, via
-      // `visibility` -- see the big comment on `layersByStep` above for
-      // why this is `visibility` and not `opacity`.
-      if (currentStepIndex !== -1 && currentStepIndex !== index) {
-        setStepVisibility(currentStepIndex, false);
-        hideClickTooltip(); // last reading belongs to the step just hidden
-      }
       currentStepIndex = index;
 
       const stepLayers = layersByStep.get(index);
-      if (stepLayers) {
-        // Cache hit (including a build already in flight for this exact
-        // index): re-insert to move this step to the MRU end of
-        // layersByStep's iteration order (see evictOldCachedStepsIfNeeded),
-        // and make sure it's the visible one.
+      const state = stepLoadState.get(index);
+      if (stepLayers && state?.loaded) {
+        // True cache hit -- this step's data already settled at some
+        // earlier point, so it's safe to swap on-screen visibility right
+        // now with no flash risk. Re-insert to move this step to the MRU
+        // end of layersByStep's iteration order (see
+        // evictOldCachedStepsIfNeeded).
         layersByStep.delete(index);
         layersByStep.set(index, stepLayers);
-        setStepVisibility(index, true);
-      } else {
+        revealStep(index);
+      } else if (!stepLayers) {
         // Not built yet -- request a (possibly queued) build; see
         // requestStepBuild for why this doesn't just build inline.
+        // Whatever's currently visible stays put -- see revealStep(),
+        // called from onStepFullyLoaded -- until this step's data actually
+        // arrives, so the map never goes blank in the meantime.
         requestStepBuild(index);
       }
+      // else: layers exist but haven't settled yet (a build already in
+      // flight for this exact index) -- nothing to do here either; stay on
+      // whatever's visible and let onStepFullyLoaded reveal it once ready.
 
-      document.getElementById("time-valid").textContent = step.valid_time;
-      document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
+      // Deliberately NOT updating time-valid/time-lead/the slider position
+      // here -- that happens in revealStep(), gated on the frame actually
+      // being on screen, so the label never gets ahead of what's rendered
+      // (see the comment there). Manual slider dragging still gets instant
+      // label feedback, but via previewStepLabel in setupTimeSlider, not
+      // this function.
       refreshMeta();
     }
 
@@ -1053,8 +1380,12 @@
       playTimer = null;
       if (!isPlaying) return;
       const next = (currentStepIndex + 1) % activeSteps.length;
-      document.getElementById("time-slider").value = String(next);
-      previewStepLabel(next);
+      // NB: the slider position and time label are intentionally NOT
+      // updated here -- that used to happen eagerly, right before the
+      // frame it describes had actually loaded, so the displayed time
+      // raced ahead of what was on screen during autoplay. showStep()/
+      // revealStep() now move both, gated on the frame actually being
+      // shown.
       showStep(next);
       // NB: layersByStep.has(next) is NOT "next has finished loading" --
       // buildStepLayers() inserts into layersByStep synchronously the
