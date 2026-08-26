@@ -14,6 +14,7 @@ from typing import Protocol
 import numpy as np
 
 from frontfinder.config.manifests import ModelManifest
+from frontfinder.inference.hemisphere import flip_southern_hemisphere
 from frontfinder.inference.periodic import circularly_pad_longitude
 from frontfinder.inference.tiling import generate_tiles, pad_to_multiple, stitch
 
@@ -81,6 +82,7 @@ def run_tiled_inference(
     overlap: int = 32,
     batch_size: int = 8,
     lon_deg: np.ndarray | None = None,
+    lat_deg: np.ndarray | None = None,
 ) -> np.ndarray:
     """Run `predictor` over `input_grid` (H, W, n_channels) patch-by-patch and
     return served-class probabilities on the original (unpadded) grid, shape
@@ -96,6 +98,15 @@ def run_tiled_inference(
     2026-08-23 prime-meridian artifact this fixes. Safe to pass a regional
     (non-global) grid's lon coordinate too -- it's a no-op there, since a
     regional box has no real wraparound to give it.
+
+    `lat_deg`: the grid's 1-D latitude coordinate (e.g. `source.lat`). When
+    given, southern-hemisphere (lat < 0) rows are mirrored across the
+    equator (see `hemisphere.flip_southern_hemisphere`) before tiling, and
+    the served output's southern-hemisphere rows are mirrored back
+    afterwards -- so the model, which has only ever seen
+    northern-hemisphere-consistent fronts, sees southern-hemisphere flow in
+    the orientation it was trained on, while the returned array is still in
+    the original grid orientation.
     """
     if input_grid.ndim != 3:
         raise ValueError(f"input_grid must be (H, W, C), got shape {input_grid.shape}")
@@ -106,13 +117,15 @@ def run_tiled_inference(
             f"expects {manifest.n_channels}"
         )
 
+    working_grid = flip_southern_hemisphere(input_grid, lat_deg) if lat_deg is not None else input_grid
+
     is_global_lon = (
         lon_deg is not None
         and len(lon_deg) > 1
         and np.isclose(float(lon_deg[-1] - lon_deg[0]) + float(lon_deg[1] - lon_deg[0]), 360.0, atol=1e-6)
     )
     lon_pad = overlap if is_global_lon else 0
-    working_grid = circularly_pad_longitude(input_grid, lon_deg, lon_pad) if lon_pad else input_grid
+    working_grid = circularly_pad_longitude(working_grid, lon_deg, lon_pad) if lon_pad else working_grid
     working_width = working_grid.shape[1]
 
     padded_h = pad_to_multiple(height, manifest.patch_multiple)
@@ -142,4 +155,6 @@ def run_tiled_inference(
     stitched = stitch(tiles, predictions, out_height=height, out_width=working_width, overlap=overlap)
     if lon_pad:
         stitched = stitched[:, lon_pad:lon_pad + width, :]
+    if lat_deg is not None:
+        stitched = flip_southern_hemisphere(stitched, lat_deg)
     return stitched

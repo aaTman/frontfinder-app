@@ -116,6 +116,78 @@ def test_run_tiled_inference_batches_calls_to_predictor():
     assert all(shape[0] <= 2 for shape in predictor.calls)
 
 
+def test_run_tiled_inference_flips_southern_hemisphere_rows_before_predicting():
+    # The model has only ever seen northern-hemisphere-consistent fronts, so
+    # southern-hemisphere (lat < 0) rows must be mirrored across the equator
+    # before the predictor sees them. Tag channel 0 with each row's original
+    # index and capture exactly what the predictor receives: northern rows
+    # (lat >= 0) must arrive in their original order, southern rows reversed.
+    height, width = 32, 32
+    lat = np.linspace(15.0, -15.0, height)  # rows 0..15 >= 0, rows 16..31 < 0
+    n_channels = MODEL_1702_MANIFEST.n_channels
+    input_grid = np.zeros((height, width, n_channels), dtype=np.float32)
+    input_grid[:, :, 0] = np.arange(height, dtype=np.float32)[:, None]
+
+    captured: list[np.ndarray] = []
+
+    class CapturingPredictor:
+        def predict_batch(self, patches: np.ndarray) -> np.ndarray:
+            captured.append(patches[0, :, 0, 0].copy())
+            n, h, w, _ = patches.shape
+            return np.zeros((n, h, w, len(ALL_CLASSES)), dtype=np.float32)
+
+    run_tiled_inference(
+        CapturingPredictor(), input_grid, MODEL_1702_MANIFEST,
+        patch_size=32, overlap=0, lat_deg=lat,
+    )
+
+    seen = captured[0]
+    np.testing.assert_allclose(seen[:16], np.arange(16))  # northern rows untouched
+    np.testing.assert_allclose(seen[16:], np.arange(31, 15, -1))  # southern rows reversed
+
+
+def test_run_tiled_inference_flips_output_back_to_original_orientation():
+    height, width = 32, 32
+    lat = np.linspace(15.0, -15.0, height)
+    n_channels = MODEL_1702_MANIFEST.n_channels
+    input_grid = np.zeros((height, width, n_channels), dtype=np.float32)
+    input_grid[:, :, 0] = np.arange(height, dtype=np.float32)[:, None]
+
+    class RowTagPredictor:
+        """Echoes back the row-tag channel as every served class's value, so
+        the output can be checked for having been un-flipped."""
+
+        def predict_batch(self, patches: np.ndarray) -> np.ndarray:
+            n, h, w, _ = patches.shape
+            tag = patches[..., 0]
+            return np.repeat(tag[..., None], len(ALL_CLASSES), axis=-1).astype(np.float32)
+
+    out = run_tiled_inference(
+        RowTagPredictor(), input_grid, MODEL_1702_MANIFEST,
+        patch_size=32, overlap=0, lat_deg=lat,
+    )
+
+    cold_idx = MODEL_1702_MANIFEST.served_classes.index("cold")
+    np.testing.assert_allclose(out[:, 0, cold_idx], np.arange(height))
+
+
+def test_run_tiled_inference_is_unaffected_by_lat_deg_when_all_northern():
+    height, width = 32, 32
+    lat = np.linspace(45.0, 15.0, height)  # entirely northern hemisphere
+    n_channels = MODEL_1702_MANIFEST.n_channels
+    rng = np.random.default_rng(0)
+    input_grid = rng.standard_normal((height, width, n_channels)).astype(np.float32)
+    predictor = ConstantPredictor(n_classes=len(ALL_CLASSES))
+
+    with_lat = run_tiled_inference(
+        predictor, input_grid, MODEL_1702_MANIFEST, patch_size=32, overlap=0, lat_deg=lat,
+    )
+    without_lat = run_tiled_inference(
+        predictor, input_grid, MODEL_1702_MANIFEST, patch_size=32, overlap=0,
+    )
+    np.testing.assert_allclose(with_lat, without_lat)
+
+
 def test_keras_predictor_serves_the_first_deep_supervision_head_not_the_last():
     # Regression test for the 2026-08-22 "wide flat bar" bug: KerasPredictor
     # used to take output[-1] on the (wrong) assumption that a deep
