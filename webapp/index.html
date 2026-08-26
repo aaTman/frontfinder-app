@@ -195,8 +195,9 @@
       margin-top: 10px; border-top: 1px solid #2a2f3d; padding-top: 10px;
       display: none; /* shown once a run with >1 step is loaded */
     }
-    #time-label { font-size: 12px; display: flex; justify-content: space-between; }
-    #time-label .lead { color: #8b90a0; }
+    #time-label { font-size: 12px; }
+    #time-init { color: #e6e8ee; }
+    #time-forecast { color: #8b90a0; margin-top: 2px; }
     /* 2026-08-23: play/pause button + slider row, per Taylor's reference
        (https://madewithmaplibre.com/products/yr-no/). Slider needs
        min-width: 0 to actually shrink inside the flex row instead of
@@ -204,12 +205,18 @@
        like other elements without it. */
     #time-scrubber { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
     #time-scrubber input[type="range"] { flex: 1; min-width: 0; accent-color: #3d6bff; }
+    #time-max-lead { flex: none; font-size: 11px; color: #8b90a0; }
     #play-button {
       flex: none; width: 26px; height: 26px; border-radius: 50%; padding: 0;
       border: 1px solid #3a3f4d; background: #1c2130; color: #e6e8ee;
       cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center;
     }
     #play-button:hover { background: #2a3040; }
+    #autoload-toggle {
+      display: flex; align-items: center; gap: 6px; margin-top: 8px;
+      font-size: 12px; color: #8b90a0; cursor: pointer; user-select: none;
+    }
+    #autoload-toggle input { accent-color: #3d6bff; margin: 0; cursor: pointer; }
     #meta { margin-top: 10px; font-size: 11px; color: #8b90a0; border-top: 1px solid #2a2f3d; padding-top: 8px; }
     #meta.error { color: #ff8080; }
 
@@ -384,11 +391,19 @@
          Re-add a toggle here once it's back; single-model display until then. -->
     <div id="class-toggles"></div>
     <div id="time-control">
-      <div id="time-label"><span id="time-valid">--</span><span class="lead" id="time-lead">--</span></div>
+      <div id="time-label">
+        <div id="time-init">IFS Initialization --</div>
+        <div id="time-forecast">Forecast Hour <span id="time-lead">--</span> valid <span id="time-valid">--</span></div>
+      </div>
       <div id="time-scrubber">
         <button id="play-button" type="button" aria-label="Play">&#9654;</button>
         <input type="range" id="time-slider" min="0" max="0" value="0" step="1" />
+        <span id="time-max-lead"></span>
       </div>
+      <label id="autoload-toggle">
+        <input type="checkbox" id="autoload-checkbox" />
+        Auto-load timesteps
+      </label>
     </div>
     <div id="meta">loading…</div>
   </div>
@@ -431,6 +446,25 @@
         Equivalent potential temperature (&theta;<sub>e</sub>), u-wind,
         v-wind, and specific humidity, each on six pressure levels (1000,
         925, 850, 700, 500, and 300&nbsp;hPa), for 24 input channels total.
+      </p>
+
+      <h3>Southern hemisphere</h3>
+      <p>
+        The model is trained only on northern hemisphere fronts, where
+        cyclones rotate counterclockwise. South of the equator the rotation
+        is reversed, so the raw input does not look like anything the model
+        was trained on.
+      </p>
+      <p>
+        Each forecast is run through the model twice. The first pass uses
+        the grid as published, and its northern hemisphere is what the map
+        shows. The second pass negates v-wind south of the equator and
+        flips the entire grid end to end before inference, then flips the
+        output back; its southern hemisphere is what the map shows there.
+        Flipping the whole grid rather than just the southern half keeps
+        each row's neighboring context intact instead of placing the south
+        pole next to the equator, at the cost of running inference twice
+        per lead time.
       </p>
 
       <h3>Loss function</h3>
@@ -807,10 +841,12 @@
 
     // Swaps on-screen visibility to `index`'s layers -- and only to
     // `index`'s layers -- the moment they're actually ready to show.
-    // Whatever was visible before stays visible until `index`'s layers have
-    // actually painted at least once (see the GL_WARMUP_FRAMES comment
-    // below), so there's never a frame with nothing (or a half-loaded step)
-    // on screen between one step and the next; see showStep/
+    // Whatever was visible before stays visible, alone, until `index`'s
+    // layers have actually finished painting (see the RENDER_SETTLE_MS
+    // comment below) -- at which point the swap happens as a single atomic
+    // step (see the 2026-08-26 "no cross-fade" note further down), so
+    // there's never a frame with nothing on screen, a half-loaded step, or
+    // two different valid times' data blended together; see showStep/
     // onStepFullyLoaded for the two places this gets called once `index` is
     // confirmed ready.
     //
@@ -828,46 +864,63 @@
     // every layer we kept hidden while "loading" (deliberately, to avoid
     // showing a half-fetched frame) had done *zero* GPU-side work by the
     // time we flipped it visible -- the reveal frame was always its first
-    // real paint, cold. That's what was flashing blank on every single
-    // step, regardless of how long showStep/onStepFullyLoaded waited
-    // beforehand.
+    // real paint, cold.
     //
-    // Fix: keep the outgoing step visible for a couple of real animation
-    // frames after the incoming step is marked visible, so MapLibre
-    // actually calls the incoming layers' prerender()/render() (warming up
-    // regionRenderer) before the outgoing ones disappear. The two layers
-    // are both visible (overlapping, translucent) for those couple of
-    // frames -- a brief color-mix, not a blank map -- then the old one
-    // hides once the new one has had real paint calls.
-    const GL_WARMUP_FRAMES = 2;
+    // 2026-08-26: the first fix for that (wait 2 real "render" events, then
+    // hide the outgoing step) was still wrong -- just a shorter-lived
+    // version of the same blank-flash bug, confirmed by instrumenting a
+    // live run: after those 2 events fired and the outgoing step was
+    // hidden, the incoming step's own pixels were frequently still not on
+    // screen for another 1-3+ seconds. Traced into the actual
+    // @carbonplan/zarr-layer bundle (esm.sh, unminified): a cold layer's
+    // `regionRenderer` doesn't finish its GPU work in that first prerender()
+    // call -- it streams content in progressively over many real frames,
+    // self-driving further repaints via the layer's own
+    // `invalidate()` (`this.tileNeedsRender = true; map.triggerRepaint()`)
+    // for as long as it still has more to paint. `render()` only flips
+    // `tileNeedsRender` back to `false` once it actually paints that
+    // layer's current content -- so that flag is a real per-layer "has this
+    // finished catching up" signal, exposed on every ZarrLayer instance.
+    //
+    // Also confirmed live: waiting on the map's global "render" event to go
+    // quiet (rather than reading `tileNeedsRender` directly) is NOT safe
+    // during autoplay -- "render" fires for any reason the map repaints,
+    // including an unrelated *future* step's `buildStepLayers()` calling
+    // `map.addLayer()` while this step's warmup is still pending, which
+    // resets a global-event-based settle timer indefinitely and can starve
+    // it past its own hard cap.
+    //
+    // Fix: keep the outgoing step visible and poll the incoming step's own
+    // layers' `tileNeedsRender` directly until none of them have needed a
+    // repaint for RENDER_SETTLE_MS -- i.e. its regionRenderer has actually
+    // caught up, not just been asked to start. RENDER_HARD_CAP_MS is a
+    // backstop so a step that (for whatever reason) never goes quiet can't
+    // wedge playback/scrubbing forever; it just hides the outgoing step
+    // late instead.
+    //
+    // 2026-08-26, no cross-fade: the above got the *timing* of the swap
+    // right but not its visual shape -- it made the incoming step visible
+    // (translucent, full opacity) as soon as warm-up started, stacked right
+    // on top of the still-visible outgoing step for the whole settle
+    // window, so the two valid times' fronts were genuinely blended
+    // together on screen, not just briefly both-present. Per Taylor,
+    // timesteps need to read as discrete -- never mixed, even briefly. See
+    // revealStep: the incoming step now warms up at `opacity: 0` (still
+    // `visibility: visible`, so it keeps actually painting -- see the
+    // isHidden() paragraph above for why that distinction matters) while
+    // `previous` stays the only thing actually shown, and the swap to the
+    // incoming step's real opacity + `previous` hidden happens in one
+    // synchronous pass once warm-up settles -- a hard cut, not a fade.
+    const RENDER_SETTLE_MS = 400;
+    const RENDER_SETTLE_POLL_MS = 80;
+    const RENDER_HARD_CAP_MS = 6000;
 
-    function revealStep(index) {
-      const previous = visibleStepIndex;
-      setStepVisibility(index, true);
+    // Moves the on-screen label/slider/tooltip state to `index` -- split out
+    // of revealStep so it can fire at the moment `index` actually becomes
+    // what's on screen, whether that's immediate (no cross-fade needed) or
+    // deferred until a warm-up swap completes (see revealStep).
+    function markStepVisible(index) {
       visibleStepIndex = index;
-      if (previous !== -1 && previous !== index) {
-        // MapLibre renders on demand, not continuously -- without forcing
-        // it here, a static/idle map could fire exactly one "render" event
-        // (from the setStepVisibility mutation just above) and then go
-        // quiet, leaving `previous` visible forever. triggerRepaint()
-        // forces the next frame each time until GL_WARMUP_FRAMES is hit.
-        let framesSeen = 0;
-        const onRender = () => {
-          framesSeen++;
-          if (framesSeen < GL_WARMUP_FRAMES) {
-            map.triggerRepaint();
-            return;
-          }
-          map.off("render", onRender);
-          // Only hide `previous` if nothing else has taken over as the
-          // visible step in the meantime (a fast run of reveals) -- each
-          // call's own `previous` is independent, so this just guards
-          // against a stale hide, not against `previous` itself changing.
-          setStepVisibility(previous, false);
-        };
-        map.on("render", onRender);
-        map.triggerRepaint();
-      }
       // The time label/slider position move here too, not in showStep() --
       // otherwise (e.g. during autoplay) the displayed time races ahead of
       // the frame actually on screen, showing a valid_time that doesn't
@@ -877,11 +930,107 @@
       // from this reveal-gated update.
       const step = activeSteps[index];
       if (step) {
-        document.getElementById("time-valid").textContent = step.valid_time;
-        document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
+        document.getElementById("time-valid").textContent = formatHumanUTC(step.valid_time);
+        document.getElementById("time-lead").textContent = formatForecastHour(step.step_hours);
       }
       document.getElementById("time-slider").value = String(index);
       hideClickTooltip(); // last reading belongs to whatever was visible before
+    }
+
+    // Bumped by every revealStep() call and captured as `token` at the top
+    // of each one -- lets a call's still-pending async swap (below) notice
+    // a newer reveal has since superseded it, see the token check in swap().
+    let revealToken = 0;
+
+    function revealStep(index) {
+      const previous = visibleStepIndex;
+      const token = ++revealToken;
+      if (previous === -1 || previous === index) {
+        // Nothing to cross from (first-ever reveal, or re-revealing what's
+        // already showing) -- just show it directly. Also hides every other
+        // cached step as a backstop (see the same hide-everyone-else loop
+        // in swap() below for why `previous` alone isn't trustworthy).
+        setStepVisibility(index, true);
+        for (const i of layersByStep.keys()) {
+          if (i !== index) setStepVisibility(i, false);
+        }
+        markStepVisible(index);
+        return;
+      }
+      // 2026-08-26, per Taylor: two different valid times' fronts should
+      // never be on screen blended together, even briefly -- the previous
+      // fix for the blank-flash bug kept `previous` and `index` both fully
+      // visible (translucent, overlapping) for a warm-up window, which
+      // technically avoided a *blank* frame but produced a genuinely wrong
+      // one instead (two timesteps' data superimposed).
+      //
+      // Fix: warm `index`'s layers up fully hidden from the viewer, then
+      // swap atomically. `visibility: visible` + `opacity: 0` keeps them
+      // invisible while still having MapLibre actually call their
+      // prerender()/render() every frame (a `visibility: none` layer's
+      // never do -- see the big comment above), so they can catch up
+      // exactly like before, with `previous` fully opaque and alone the
+      // entire time. Once caught up (same tileNeedsRender settle check as
+      // before), flip `index` to its real opacity and `previous` to
+      // `visibility: none` in the same synchronous pass, so MapLibre paints
+      // both changes together in one frame -- a hard cut, not a cross-fade.
+      //
+      // `opacity` here is ZarrLayer's own `setOpacity()` method
+      // (`this.opacity`, read directly in its render() uniforms), not a
+      // MapLibre style paint property -- custom layers aren't managed
+      // through `map.setPaintProperty()` at all, only `visibility` (a
+      // generic layout property every layer type supports) goes through
+      // the map. Confirmed against the library source (esm.sh, unminified).
+      const stepLayers = layersByStep.get(index) || new Map();
+      const warmLayers = [];
+      for (const [cls, layer] of stepLayers) {
+        const id = `fronts-${cls}-${index}`;
+        if (!map.getLayer(id)) continue;
+        map.setLayoutProperty(id, "visibility", classVisible.get(cls) ? "visible" : "none");
+        layer.setOpacity(0);
+        if (classVisible.get(cls)) warmLayers.push(layer);
+      }
+      let quietSince = null;
+      const swap = () => {
+        clearInterval(pollTimer);
+        clearTimeout(hardCapTimer);
+        if (token !== revealToken) {
+          // A newer reveal was requested (autoplay's next tick, or the user
+          // scrubbing further) before this one finished warming up -- undo
+          // the warm-up instead of showing a step that's already stale.
+          // Without this, both this step and whatever superseded it would
+          // end up visible at once, since each reveal only hides its own
+          // captured `previous`, not any step another in-flight reveal has
+          // since shown -- this is what left every step visible while
+          // stepping forward.
+          setStepVisibility(index, false);
+          return;
+        }
+        for (const [cls, layer] of stepLayers) {
+          const id = `fronts-${cls}-${index}`;
+          if (map.getLayer(id) && classVisible.get(cls)) layer.setOpacity(0.85);
+        }
+        // Hide every other cached step, not just `previous` -- `previous`
+        // can be stale by the time an async swap actually fires (see the
+        // token check above), so this is the real backstop against leaving
+        // more than one step visible.
+        for (const i of layersByStep.keys()) {
+          if (i !== index) setStepVisibility(i, false);
+        }
+        markStepVisible(index);
+        map.triggerRepaint();
+      };
+      const pollTimer = setInterval(() => {
+        const stillPainting = warmLayers.some((l) => l.tileNeedsRender);
+        if (stillPainting) {
+          quietSince = null;
+          return;
+        }
+        if (quietSince === null) quietSince = Date.now();
+        if (Date.now() - quietSince >= RENDER_SETTLE_MS) swap();
+      }, RENDER_SETTLE_POLL_MS);
+      const hardCapTimer = setTimeout(swap, RENDER_HARD_CAP_MS);
+      map.triggerRepaint();
     }
 
     // Removes the least-recently-shown cached step(s) once the cache
@@ -1124,8 +1273,20 @@
       hideClickTooltip(); // last reading belongs to a step/model that's gone
     }
 
-    function formatLeadHours(h) {
-      return h === 0 ? "T+0" : `T+${h}h`;
+    const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    // `isoString` is a naive "YYYY-MM-DDTHH:MM:SS" string in UTC (see
+    // run_cycle.py's _valid_time/_cycle_time) -- appending "Z" makes Date
+    // parse it as UTC instead of local time.
+    function formatHumanUTC(isoString) {
+      const d = new Date(`${isoString}Z`);
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      const hour = String(d.getUTCHours()).padStart(2, "0");
+      return `${d.getUTCFullYear()} ${MONTH_ABBR[d.getUTCMonth()]} ${day} ${hour}Z`;
+    }
+
+    function formatForecastHour(h) {
+      return String(h).padStart(3, "0");
     }
 
     // Updates just the text readout, with no layer work -- cheap enough to
@@ -1135,8 +1296,8 @@
     function previewStepLabel(index) {
       const step = activeSteps[index];
       if (!step) return;
-      document.getElementById("time-valid").textContent = step.valid_time;
-      document.getElementById("time-lead").textContent = formatLeadHours(step.step_hours);
+      document.getElementById("time-valid").textContent = formatHumanUTC(step.valid_time);
+      document.getElementById("time-lead").textContent = formatForecastHour(step.step_hours);
     }
 
     // Builds one step's 4 class ZarrLayers and caches them under `index`.
@@ -1256,7 +1417,11 @@
         requestStepBuild(next);
       } else {
         pendingIndex = null;
-        schedulePrefetchNeighbors(currentStepIndex);
+        // Auto-load supersedes the neighbor-only prefetch below -- it's a
+        // superset (eventually covers the same neighbors, then keeps going)
+        // -- so there's no reason to run both.
+        if (autoLoadEnabled) scheduleAutoLoad();
+        else schedulePrefetchNeighbors(currentStepIndex);
       }
       // Playback was waiting on this exact step to finish building (see
       // advancePlayback) before it could schedule the next frame -- resume
@@ -1297,14 +1462,55 @@
       });
     }
 
-    // Reflects whether the currently-displayed step is still loading (a
-    // fresh build, or waiting behind another build in the queue) in the
-    // meta line, so scrubbing to a new step gives some feedback instead of
-    // silently sitting on the previous step's frame.
+    // 2026-08-26, per Taylor's request: opt-in background fetch of every
+    // step in the current cycle, so the whole run is ready to scrub/play
+    // through instantly without the user ever pressing play or touching the
+    // slider first. Off by default -- unlike schedulePrefetchNeighbors
+    // (always on, but only ever a step or two ahead), this walks the
+    // *entire* run, which for a 240h cycle means ~40 steps' worth of zarr
+    // fetches and live GL layers; only worth paying that cost when the user
+    // actually asks for it via the checkbox (see setupAutoLoadToggle).
+    let autoLoadEnabled = false;
+
+    // Builds the lowest-indexed not-yet-built step, one at a time, chained
+    // via onStepFullyLoaded's else-branch the same way schedulePrefetchNeighbors
+    // is -- each call only ever kicks off a single build so it always
+    // defers to real navigation (requestStepBuild's buildingIndex/
+    // pendingIndex gate still applies), it just never stops asking once a
+    // build completes and nothing else is queued.
+    function scheduleAutoLoad() {
+      if (!autoLoadEnabled) return;
+      requestIdle(() => {
+        if (!autoLoadEnabled) return;
+        if (buildingIndex !== -1 || pendingIndex !== null) return;
+        for (let i = 0; i < activeSteps.length; i++) {
+          if (layersByStep.has(i)) continue;
+          requestStepBuild(i);
+          return;
+        }
+      });
+    }
+
+    function setupAutoLoadToggle() {
+      const checkbox = document.getElementById("autoload-checkbox");
+      checkbox.checked = autoLoadEnabled;
+      checkbox.onchange = () => {
+        autoLoadEnabled = checkbox.checked;
+        if (autoLoadEnabled) scheduleAutoLoad();
+      };
+    }
+
+    // 2026-08-26: used to also append " · loading…" while the current step
+    // was mid-build -- dropped per Taylor's request. That suffix popped in
+    // and out on essentially every autoplay step (a step is "loading" for
+    // most of its ~1s build window -- see revealStep's settle wait), and
+    // #panel sizes to its content, so the whole card's width jittered in
+    // sync with the flicker this fix's `revealStep` change was specifically
+    // trying to get rid of. The error suffix stays: it's rare/persistent,
+    // not a per-step toggle, so it doesn't cause the same jitter.
     function refreshMeta() {
-      const loading = buildingIndex === currentStepIndex || pendingIndex === currentStepIndex;
       const stepError = stepLoadState.get(currentStepIndex)?.error;
-      const suffix = loading ? " · loading…" : stepError ? " · no data for this step" : "";
+      const suffix = stepError ? " · no data for this step" : "";
       setMeta(`${MODELS[activeModel].label} · cycle ${activeCycleTime}${suffix}`, Boolean(stepError));
     }
 
@@ -1445,6 +1651,8 @@
       control.style.display = "block";
       slider.max = String(activeSteps.length - 1);
       slider.value = "0";
+      const maxStepHours = activeSteps[activeSteps.length - 1].step_hours;
+      document.getElementById("time-max-lead").textContent = `max T+${maxStepHours}h`;
       // Reassigning oninput (rather than addEventListener, which would
       // stack a new listener every model load) since loadModel() can run
       // more than once per page life.
@@ -1510,6 +1718,7 @@
       try {
         const { cycleTime, steps } = await resolveLatestRun(model);
         activeCycleTime = cycleTime;
+        document.getElementById("time-init").textContent = `IFS Initialization ${formatHumanUTC(activeCycleTime)}`;
         activeSteps = steps;
         setupTimeSlider();
         showStep(0); // T+0 by default
@@ -1536,6 +1745,7 @@
     buildClassToggles();
     buildLegend();
     setupPlayButton();
+    setupAutoLoadToggle();
     setupInfoModal();
     document.getElementById("legend-hide").addEventListener("click", (e) => {
       const content = document.getElementById("legend-content");
