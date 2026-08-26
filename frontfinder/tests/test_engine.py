@@ -116,50 +116,27 @@ def test_run_tiled_inference_batches_calls_to_predictor():
     assert all(shape[0] <= 2 for shape in predictor.calls)
 
 
-def test_run_tiled_inference_flips_southern_hemisphere_rows_before_predicting():
-    # The model has only ever seen northern-hemisphere-consistent fronts, so
-    # southern-hemisphere (lat < 0) rows must be mirrored across the equator
-    # before the predictor sees them. Tag channel 0 with each row's original
-    # index and capture exactly what the predictor receives: northern rows
-    # (lat >= 0) must arrive in their original order, southern rows reversed.
+def test_run_tiled_inference_negates_meridional_wind_on_southern_rows_in_final_output():
+    # The model has only ever seen northern-hemisphere-consistent
+    # (counterclockwise) fronts, so the final, row-aligned output must show
+    # southern-hemisphere (lat < 0) rows with their meridional wind sign
+    # flipped, in their ORIGINAL row order -- the two-pass whole-grid flip
+    # (see engine.run_tiled_inference's docstring) must restore correct row
+    # alignment on the way out, not leave the south still reversed.
     height, width = 32, 32
     lat = np.linspace(15.0, -15.0, height)  # rows 0..15 >= 0, rows 16..31 < 0
     n_channels = MODEL_1702_MANIFEST.n_channels
+    v_idx = MODEL_1702_MANIFEST.channel_names().index("v_component_of_wind_1000")
     input_grid = np.zeros((height, width, n_channels), dtype=np.float32)
-    input_grid[:, :, 0] = np.arange(height, dtype=np.float32)[:, None]
-
-    captured: list[np.ndarray] = []
-
-    class CapturingPredictor:
-        def predict_batch(self, patches: np.ndarray) -> np.ndarray:
-            captured.append(patches[0, :, 0, 0].copy())
-            n, h, w, _ = patches.shape
-            return np.zeros((n, h, w, len(ALL_CLASSES)), dtype=np.float32)
-
-    run_tiled_inference(
-        CapturingPredictor(), input_grid, MODEL_1702_MANIFEST,
-        patch_size=32, overlap=0, lat_deg=lat,
-    )
-
-    seen = captured[0]
-    np.testing.assert_allclose(seen[:16], np.arange(16))  # northern rows untouched
-    np.testing.assert_allclose(seen[16:], np.arange(31, 15, -1))  # southern rows reversed
-
-
-def test_run_tiled_inference_flips_output_back_to_original_orientation():
-    height, width = 32, 32
-    lat = np.linspace(15.0, -15.0, height)
-    n_channels = MODEL_1702_MANIFEST.n_channels
-    input_grid = np.zeros((height, width, n_channels), dtype=np.float32)
-    input_grid[:, :, 0] = np.arange(height, dtype=np.float32)[:, None]
+    input_grid[:, :, v_idx] = np.arange(height, dtype=np.float32)[:, None]
 
     class RowTagPredictor:
-        """Echoes back the row-tag channel as every served class's value, so
-        the output can be checked for having been un-flipped."""
+        """Echoes the v-channel's own value back as every served class, so
+        the final stitched output reveals exactly what value each row's
+        v-channel carried all the way through (both passes, both flips)."""
 
         def predict_batch(self, patches: np.ndarray) -> np.ndarray:
-            n, h, w, _ = patches.shape
-            tag = patches[..., 0]
+            tag = patches[..., v_idx]
             return np.repeat(tag[..., None], len(ALL_CLASSES), axis=-1).astype(np.float32)
 
     out = run_tiled_inference(
@@ -168,7 +145,30 @@ def test_run_tiled_inference_flips_output_back_to_original_orientation():
     )
 
     cold_idx = MODEL_1702_MANIFEST.served_classes.index("cold")
-    np.testing.assert_allclose(out[:, 0, cold_idx], np.arange(height))
+    np.testing.assert_allclose(out[:16, 0, cold_idx], np.arange(16))         # northern rows untouched
+    np.testing.assert_allclose(out[16:, 0, cold_idx], -np.arange(16, 32))    # southern rows negated, order preserved
+
+
+def test_run_tiled_inference_does_not_negate_zonal_wind_or_other_channels():
+    height, width = 32, 32
+    lat = np.linspace(15.0, -15.0, height)
+    n_channels = MODEL_1702_MANIFEST.n_channels
+    u_idx = MODEL_1702_MANIFEST.channel_names().index("u_component_of_wind_1000")
+    input_grid = np.zeros((height, width, n_channels), dtype=np.float32)
+    input_grid[:, :, u_idx] = np.arange(height, dtype=np.float32)[:, None]
+
+    class RowTagPredictor:
+        def predict_batch(self, patches: np.ndarray) -> np.ndarray:
+            tag = patches[..., u_idx]
+            return np.repeat(tag[..., None], len(ALL_CLASSES), axis=-1).astype(np.float32)
+
+    out = run_tiled_inference(
+        RowTagPredictor(), input_grid, MODEL_1702_MANIFEST,
+        patch_size=32, overlap=0, lat_deg=lat,
+    )
+
+    cold_idx = MODEL_1702_MANIFEST.served_classes.index("cold")
+    np.testing.assert_allclose(out[:, 0, cold_idx], np.arange(height))  # untouched, and correctly row-aligned
 
 
 def test_run_tiled_inference_is_unaffected_by_lat_deg_when_all_northern():
