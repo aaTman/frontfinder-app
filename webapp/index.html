@@ -992,6 +992,19 @@
         // already showing) -- just show it directly. Also hides every other
         // cached step as a backstop (see the same hide-everyone-else loop
         // in swap() below for why `previous` alone isn't trustworthy).
+        //
+        // Restoring opacity here (not just visibility) matters now:
+        // buildStepLayers() warms a new step up at opacity 0 (see its
+        // comment) so MapLibre keeps calling prerender() while it's still
+        // fetching -- this is the first point after that where the step is
+        // actually ready, so it's also the first point where the zeroed
+        // opacity needs undoing.
+        const stepLayers = layersByStep.get(index);
+        if (stepLayers) {
+          for (const [cls, layer] of stepLayers) {
+            if (classVisible.get(cls)) layer.setOpacity(0.85);
+          }
+        }
         setStepVisibility(index, true);
         for (const i of layersByStep.keys()) {
           if (i !== index) setStepVisibility(i, false);
@@ -1354,9 +1367,10 @@
     // Builds one step's 4 class ZarrLayers and caches them under `index`.
     // Only called for steps not already in layersByStep -- see
     // requestStepBuild for the gate that keeps at most one of these
-    // in flight at a time. Starts hidden regardless of whether `index` is
-    // the current target step -- see revealStep() for why the swap is
-    // deferred until this step's data has actually settled.
+    // in flight at a time. The real reveal/swap is still deferred until
+    // this step's data has actually settled (see revealStep(), called from
+    // onStepFullyLoaded) -- but see the warm-up note below for why these
+    // layers can't just start fully hidden in the meantime.
     function buildStepLayers(index) {
       const step = activeSteps[index];
       const storePath = absoluteStorePath(activeModel, step.store);
@@ -1429,12 +1443,33 @@
         stepLayers.set(cls, layer);
       }
       layersByStep.set(index, stepLayers);
-      // Always starts hidden, even if `index` is the current target step --
-      // its chunks haven't arrived yet, so showing it now would flash a
-      // blank/half-loaded frame. revealStep() (called from
-      // onStepFullyLoaded once this step's data actually settles) is what
-      // makes it visible, and only then.
-      setStepVisibility(index, false);
+      // NOT setStepVisibility(index, false) -- confirmed against the
+      // library source (see the big comment on revealStep()/setStepVisibility
+      // above): a `visibility: none` custom layer's prerender()/render()
+      // are never invoked by MapLibre, and prerender() is the only place
+      // ZarrLayer calls regionRenderer.update(), which is what actually
+      // starts fetching chunk data. A brand-new step hidden immediately
+      // like that can never fetch anything, which means it can never reach
+      // stepLoadState.loaded, which is the only thing that would ever make
+      // revealStep() show it -- a permanent deadlock. Confirmed live
+      // 2026-08-28: steps built via the slider sat on just their initial
+      // zarr.json metadata fetch forever, no chunk requests ever following,
+      // until manually panning/zooming the map forced enough incidental
+      // repaints to kick them loose.
+      //
+      // Fix: warm up visible-but-transparent instead (same trick
+      // revealStep() already uses for a loaded-but-not-yet-shown step),
+      // so MapLibre keeps calling prerender() every frame and the fetch
+      // actually starts. onStepFullyLoaded() hides it again once it settles,
+      // unless it's what showStep() currently wants on screen, in which
+      // case revealStep() takes over the swap as before.
+      for (const [cls, layer] of stepLayers) {
+        const id = `fronts-${cls}-${index}`;
+        if (!map.getLayer(id)) continue;
+        map.setLayoutProperty(id, "visibility", classVisible.get(cls) ? "visible" : "none");
+        layer.setOpacity(0);
+      }
+      map.triggerRepaint();
       evictOldCachedStepsIfNeeded();
     }
 
@@ -1463,7 +1498,17 @@
       // Reveals even on a load error (state.error) since that's this
       // step's terminal state either way -- refreshMeta below is what
       // surfaces "no data for this step" once it's showing.
-      if (index === currentStepIndex) revealStep(index);
+      if (index === currentStepIndex) {
+        revealStep(index);
+      } else {
+        // A background prefetch/autoload build settled while the user was
+        // looking at a different step -- go back to fully hidden now that
+        // regionRenderer has actually caught up, rather than leaving it at
+        // the buildStepLayers() warm-up's visible-but-opacity-0 state
+        // (still a full render pass every frame -- see the 2026-08-21
+        // opacity-vs-visibility comment above for why that's costly).
+        setStepVisibility(index, false);
+      }
       refreshMeta();
       if (pendingIndex !== null && pendingIndex !== index) {
         const next = pendingIndex;
