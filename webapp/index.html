@@ -38,6 +38,10 @@
        a visibly different-toned slab. */
     html, body, #map { height: 100%; margin: 0; background: var(--black); }
     #map { position: absolute; top: var(--nav-height); left: 0; right: 0; bottom: 0; height: auto; }
+    /* See unstickNarrowViewportDataLoad() in the module script -- hides the
+       brief forced-wide-then-back resize used to work around a
+       @carbonplan/zarr-layer bug on narrow (phone-width) viewports. */
+    #map.resize-workaround { opacity: 0; transition: opacity 0.25s; }
     .site-nav {
       position: fixed; top: 0; left: 0; right: 0; z-index: 40;
       font-family: var(--font-sans);
@@ -1808,6 +1812,40 @@
       };
     }
 
+    // Works around a confirmed @carbonplan/zarr-layer bug (upstream, not
+    // ours -- reported 2026-08-27): under MapLibre's globe projection, its
+    // visible-region computation silently returns zero regions -- no data
+    // ever fetched, not just "slow" -- whenever the map container's CSS
+    // width is below roughly 800px, independent of zoom or device pixel
+    // ratio. That covers effectively every phone in portrait mode.
+    // Confirmed live that forcing the container wider than that threshold,
+    // calling resize(), and then shrinking back (also with a resize())
+    // reliably unsticks it -- the data fetched while briefly wide persists
+    // and renders fine once cropped back down. No known clean fix from our
+    // side short of patching the library, so this brute-forces the same
+    // effect. #map is hidden (opacity 0) for the ~2.2s round-trip so the
+    // forced-wide layout is never visible to the user; a fixed delay
+    // (rather than watching for the fetch to actually complete) keeps this
+    // self-contained -- see stepLoadState for the "real" load-settle
+    // tracking this deliberately doesn't hook into.
+    function unstickNarrowViewportDataLoad() {
+      const container = map.getContainer();
+      const SAFE_WIDTH_PX = 820; // observed failure cutoff ~745-800px; margin above it
+      const WORKAROUND_WIDTH_PX = 900;
+      const HOLD_MS = 2200;
+      if (container.clientWidth >= SAFE_WIDTH_PX) return;
+      container.classList.add("resize-workaround");
+      container.style.right = "auto";
+      container.style.width = `${WORKAROUND_WIDTH_PX}px`;
+      map.resize();
+      setTimeout(() => {
+        container.style.width = "";
+        container.style.right = "";
+        map.resize();
+        container.classList.remove("resize-workaround");
+      }, HOLD_MS);
+    }
+
     async function loadModel(model) {
       // A model switch invalidates every cached step -- different model
       // means different zarr store paths, so nothing in layersByStep is
@@ -1829,6 +1867,7 @@
         activeSteps = steps;
         setupTimeSlider();
         showStep(0); // T+0 by default
+        unstickNarrowViewportDataLoad();
       } catch (err) {
         console.error(err);
         setMeta(`${MODELS[model].label}: ${err.message}`, true);
