@@ -578,6 +578,48 @@
     // not just passed as a uniform.
     // -----------------------------------------------------------------
     const ZARR_ROOT = "/data"; // Caddy serves the zarr store tree under /data -- see deploy/Caddyfile
+
+    // Every store is written as zarr v3 (see frontfinder/zarrio/pyramid.py --
+    // zarr.consolidate_metadata() on a v3 store folds the consolidated
+    // listing into the root zarr.json itself; it does not write a v2-style
+    // top-level .zmetadata file). Without an explicit zarrVersion,
+    // @carbonplan/zarr-layer's underlying zarrita `open()` always probes v2
+    // first -- .zmetadata, then falls back to unconsolidated .zattrs/.zgroup
+    // -- and every one of those requests 404s before it ever tries v3's
+    // zarr.json. That's 3-4 wasted round trips per class layer, x4 classes,
+    // x every step built (current + prefetched neighbors), which is most of
+    // the reported slowness. Pinning the version skips the v2 probe
+    // entirely. Confirmed live, 2026-08-27.
+    const ZARR_VERSION = 3;
+
+    // Same fix for the other fetch @carbonplan/zarr-layer does on every
+    // layer init: with no explicit `bounds`/`latIsAscending`, it fetches the
+    // store's lat/lon coordinate arrays just to derive them (see the
+    // "[zarr-layer] Detected from coordinate arrays" console warning, which
+    // states these exact values). The grid is fixed -- global 0.25deg,
+    // pixel-registered, longitude -180..180, latitude descending (row 0 =
+    // north pole; see the Coriolis-correction commits) -- for every step of
+    // the only active model, so hardcoding it here skips that fetch too.
+    //
+    // 2026-08-29: root-caused a vertical truncation bug (data vanishing
+    // east of roughly -105 lon) to @carbonplan/zarr-layer's
+    // region-visibility math projecting the map's viewport (always signed
+    // -180..180 from maplibregl) against these bounds through a plain
+    // identity CRS transform with NO wraparound -- with bounds declared in
+    // the IFS-native 0..360 convention, every negative-longitude viewport
+    // (all of the Americas/Atlantic/Europe) produced negative/out-of-range
+    // store-column indices and silently fetched zero tiles there. Fixed by
+    // rolling longitude to -180..180 at serve time in
+    // frontfinder/zarrio/pyramid.py. Flipped to match here once the
+    // 2026-08-29T06Z cycle confirmed live stores are actually being
+    // written in that convention now (checked 0/lon on that store
+    // directly: -180.0 ... 179.75, ascending) -- this file is served
+    // straight off disk with no build step, so this MUST stay in sync
+    // with whatever pyramid.py is actually writing, not the other way
+    // around.
+    const GRID_BOUNDS = [-180.125, -90.125, 179.875, 90.125]; // [xMin, yMin, xMax, yMax]
+    const GRID_LAT_ASCENDING = false;
+
     const MODELS = {
       "theta-e_uv_q": { label: "theta-e_uv_q", latestPointer: `${ZARR_ROOT}/theta-e_uv_q/latest.json` },
       // model_1702 disabled -- see the HTML comment above and
@@ -1155,7 +1197,16 @@
         hideClickTooltip();
         return;
       }
-      const point = { type: "Point", coordinates: [e.lngLat.lng, e.lngLat.lat] };
+      // MapLibre's lngLat can land outside -180..180 when the map is
+      // scrolled to a wrapped copy of the world -- queryData matches
+      // against the store's own -180..180 coordinate range (see
+      // GRID_BOUNDS), so an unwrapped click on a wrapped copy would miss
+      // and queryData would silently come back empty. Confirmed live,
+      // 2026-08-27 (the store's longitude convention was still 0-360 at
+      // the time, so this used to wrap into 0-360 instead -- see
+      // GRID_BOUNDS's 2026-08-29 comment for why that changed).
+      const lng = (((e.lngLat.lng + 180) % 360) + 360) % 360 - 180;
+      const point = { type: "Point", coordinates: [lng, e.lngLat.lat] };
       const requestId = ++clickRequestId;
 
       const results = await Promise.all(
@@ -1317,6 +1368,9 @@
           id: `fronts-${cls}-${index}`,
           source: storePath,
           variable: cls,
+          zarrVersion: ZARR_VERSION,
+          bounds: GRID_BOUNDS,
+          latIsAscending: GRID_LAT_ASCENDING,
           clim: [0, 1],
           // Two identical stops: customFrag (below) is what actually
           // varies alpha by probability, so the colormap texture itself
