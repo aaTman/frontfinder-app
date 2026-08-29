@@ -33,6 +33,27 @@ from frontfinder.config.manifests import ModelManifest
 DEFAULT_N_LEVELS = 6
 CRS = "EPSG:4326"  # global IFS lat/lon grid; zarr-layer reprojects client-side
 
+# topozarr's default target_chunk_bytes (512 KiB) gives level-0 chunks of
+# ~360x361 cells -- fine on its own, but each level-0 chunk request pulls a
+# 1/4-globe-wide block even when only a small area is visible (e.g. zoomed
+# in on one country), which is wasteful on a slow connection. Smaller chunks
+# mean panning/zooming only fetches the region actually on screen.
+#
+# NOTE, 2026-08-27: this was originally written chasing a theory that
+# smaller chunks would also fix a @carbonplan/zarr-layer bug where phones
+# (viewport narrower than ~800px) never load any data under MapLibre's
+# globe projection. Confirmed live that theory was wrong -- an A/B test
+# against a real rebuilt store showed chunk size doesn't move that failure
+# threshold at all. That bug is worked around separately, client-side, in
+# webapp/index.html (see unstickNarrowViewportDataLoad()). This smaller
+# chunk size is kept anyway as a genuine, independent bandwidth win.
+#
+# topozarr's `get_ideal_dim` floors chunk dimensions at 128 cells regardless
+# of how small target_chunk_bytes is asked to go, so 128 is the smallest
+# chunk this library can produce -- target_chunk_bytes below is set to hit
+# that floor exactly.
+SMALL_CHUNK_BYTES = 64 * 1024  # 128*128 float32 cells exactly hits the floor
+
 # Fixed per-class color styling (colormap name + [min, max] clim), embedded
 # as zarr variable attrs since the installed topozarr version doesn't yet
 # support `layer_hints`. clim=[0, 1] because these are softmax class
@@ -64,6 +85,45 @@ class FrontFields:
             raise ValueError(f"field shape(s) {bad} do not match (lat, lon) = {expected}")
 
 
+def _roll_lon_0_360_to_signed(lon: np.ndarray, arrays: dict[str, np.ndarray]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Reindexes a global 0..360-convention longitude axis (IFS-native --
+    see `IFSFieldSource._lon = np.linspace(0.0, 359.75, 1440)`) to the
+    standard -180..180 convention, ascending.
+
+    2026-08-29: this is a serve-time-only fix for a webapp truncation bug,
+    not an inference concern -- inference (tiling, antimeridian padding)
+    runs entirely on the native 0..360 grid upstream, unaffected by this.
+    @carbonplan/zarr-layer's region-visibility math projects the map
+    viewport (always signed -180..180 from maplibregl) against the store's
+    declared bounds through a plain identity CRS transform with no
+    wraparound. With the store served in 0..360, every negative-longitude
+    viewport -- all of the Americas, the Atlantic, western Europe --
+    produced negative/out-of-range store-column indices and silently
+    fetched zero tiles there: a hard vertical cutoff in the webapp that
+    only went away once zoomed out far enough to trip the library's own
+    "viewport wraps past +-180" fallback (which just fetches everything).
+    Re-serving in -180..180 -- the convention both maplibre and
+    @carbonplan/zarr-layer actually assume -- fixes it at every zoom/pan.
+    See webapp/index.html's GRID_BOUNDS for the client-side half of this.
+
+    No-op for a regional (non-global) `lon` -- mirrors the `is_global_lon`
+    check in `inference.engine.run_tiled_inference`: only a lon axis that
+    actually spans the full 360deg globe has a real antimeridian seam to
+    roll across; a regional box's edges are just its edges.
+    """
+    n = len(lon)
+    is_global_lon = n > 1 and np.isclose(float(lon[-1] - lon[0]) + float(lon[1] - lon[0]), 360.0, atol=1e-6)
+    if not is_global_lon:
+        return lon, arrays
+    if n % 2 != 0:
+        raise ValueError(f"expected an even-length global longitude axis, got {n}")
+    shift = n // 2
+    rolled_lon = np.roll(lon, shift)
+    signed_lon = np.where(rolled_lon >= 180, rolled_lon - 360, rolled_lon)
+    rolled_arrays = {k: np.roll(v, shift, axis=1) for k, v in arrays.items()}
+    return signed_lon, rolled_arrays
+
+
 def build_level0_dataset(fields: FrontFields, manifest: ModelManifest) -> xr.Dataset:
     """Assemble the native-resolution, CRS-tagged, style-annotated xr.Dataset
     for one model run."""
@@ -74,14 +134,16 @@ def build_level0_dataset(fields: FrontFields, manifest: ModelManifest) -> xr.Dat
     if extra:
         raise ValueError(f"unexpected fields not in manifest.served_classes: {extra}")
 
+    lon, probabilities = _roll_lon_0_360_to_signed(fields.lon, fields.probabilities)
+
     data_vars = {}
     for cls in manifest.served_classes:
         attrs = dict(CLASS_STYLE.get(cls, {}))
-        data_vars[cls] = (("lat", "lon"), fields.probabilities[cls].astype(np.float32), attrs)
+        data_vars[cls] = (("lat", "lon"), probabilities[cls].astype(np.float32), attrs)
 
     ds = xr.Dataset(
         data_vars=data_vars,
-        coords={"lat": fields.lat, "lon": fields.lon},
+        coords={"lat": fields.lat, "lon": lon},
         attrs={
             "model": manifest.name,
             "valid_time": fields.valid_time,
@@ -99,7 +161,9 @@ def build_front_pyramid(fields: FrontFields, manifest: ModelManifest, n_levels: 
     if n_levels < 1:
         raise ValueError(f"n_levels must be >= 1, got {n_levels}")
     ds = build_level0_dataset(fields, manifest)
-    return create_pyramid(ds, levels=n_levels, x_dim="lon", y_dim="lat", method="mean")
+    return create_pyramid(
+        ds, levels=n_levels, x_dim="lon", y_dim="lat", method="mean", target_chunk_bytes=SMALL_CHUNK_BYTES
+    )
 
 
 def write_front_pyramid(pyramid: Pyramid, store_path: str) -> None:

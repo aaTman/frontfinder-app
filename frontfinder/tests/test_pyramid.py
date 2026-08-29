@@ -29,6 +29,21 @@ def small_fields():
     )
 
 
+@pytest.fixture
+def global_fields():
+    lat = np.linspace(89.875, -89.875, 8)
+    lon = np.linspace(0.0, 360.0, 16, endpoint=False)  # uniform-step global 0..360 axis, coarse for test speed
+    rng = np.random.default_rng(1)
+    probs = {cls: rng.random((8, 16)).astype(np.float32) for cls in MODEL_1702_MANIFEST.served_classes}
+    return FrontFields(
+        probabilities=probs,
+        lat=lat,
+        lon=lon,
+        valid_time="2026-08-19T12:00:00",
+        cycle_time="2026-08-19T12:00:00",
+    )
+
+
 def test_front_fields_rejects_shape_mismatch():
     lat = np.linspace(0, 1, 10)
     lon = np.linspace(0, 1, 10)
@@ -80,6 +95,44 @@ def test_build_level0_dataset_embeds_colormap_and_clim_style_attrs(small_fields)
 def test_build_front_pyramid_rejects_zero_levels(small_fields):
     with pytest.raises(ValueError):
         build_front_pyramid(small_fields, MODEL_1702_MANIFEST, n_levels=0)
+
+
+def test_build_level0_dataset_rolls_global_lon_to_signed_convention(global_fields):
+    # 2026-08-29 fix: @carbonplan/zarr-layer's region-visibility math
+    # assumes -180..180, so a global grid's 0..360 IFS-native axis gets
+    # rolled at serve time -- see _roll_lon_0_360_to_signed's docstring.
+    ds = build_level0_dataset(global_fields, MODEL_1702_MANIFEST)
+    lon = ds["lon"].values
+    assert np.all(np.diff(lon) > 0)
+    assert lon[0] == pytest.approx(-180.0)
+    assert lon[-1] == pytest.approx(157.5)
+    assert lon.min() >= -180.0 and lon.max() < 180.0
+
+
+def test_build_level0_dataset_preserves_data_at_each_lon_after_roll(global_fields):
+    # The value at a given real-world longitude must survive the reindex,
+    # not just the coordinate labels -- roll the data columns in lockstep
+    # with the lon axis, or this fix silently scrambles the map.
+    original_lon = global_fields.lon
+    original_cold = global_fields.probabilities["cold"]
+
+    ds = build_level0_dataset(global_fields, MODEL_1702_MANIFEST)
+    rolled_lon = ds["lon"].values
+    rolled_cold = ds["cold"].values
+
+    for i, lon_val in enumerate(original_lon):
+        signed = lon_val - 360 if lon_val >= 180 else lon_val
+        j = np.argmin(np.abs(rolled_lon - signed))
+        np.testing.assert_allclose(rolled_cold[:, j], original_cold[:, i])
+
+
+def test_build_level0_dataset_leaves_regional_lon_untouched(small_fields):
+    # small_fields' lon (228..299.75) is a regional window, not a full
+    # 360deg-spanning global grid -- the roll must no-op for it, exactly
+    # like inference.engine.run_tiled_inference's is_global_lon check.
+    ds = build_level0_dataset(small_fields, MODEL_1702_MANIFEST)
+    np.testing.assert_allclose(ds["lon"].values, small_fields.lon)
+    np.testing.assert_allclose(ds["cold"].values, small_fields.probabilities["cold"])
 
 
 def test_write_front_pyramid_roundtrips_through_zarr(small_fields, tmp_path):
