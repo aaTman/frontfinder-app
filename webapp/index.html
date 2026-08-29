@@ -264,7 +264,8 @@
     /* Click readout -- see updateClickTooltip() in the module script.
        Queries the real decoded zarr values at the clicked point (via
        ZarrLayer.queryData) rather than approximating from rendered pixel
-       color, and stays pinned at the last click until the next one. */
+       color. Toggles: one click shows it, the next click (anywhere on
+       the map) dismisses it. */
     #click-tooltip {
       position: fixed; z-index: 20; pointer-events: none; display: none;
       background: rgba(15, 18, 26, 0.92); color: #e6e8ee;
@@ -1198,6 +1199,13 @@
 
     async function updateClickTooltip(e) {
       const tooltip = document.getElementById("click-tooltip");
+      // Toggle: a click while the tooltip is showing dismisses it, no
+      // matter where on the map it lands -- the next click starts fresh.
+      if (tooltip.style.display === "block") {
+        clickRequestId++; // invalidate any in-flight query from that first click
+        hideClickTooltip();
+        return;
+      }
       // Reads whatever's actually on screen (visibleStepIndex), not
       // currentStepIndex -- that can be a step still mid-fetch, whose
       // layers exist but have no real data to query yet.
