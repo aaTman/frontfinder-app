@@ -1749,6 +1749,50 @@
       };
     }
 
+    function updateMaxLeadLabel() {
+      const maxStepHours = activeSteps[activeSteps.length - 1].step_hours;
+      document.getElementById("time-max-lead").textContent = `max T+${maxStepHours}h`;
+    }
+
+    // 2026-08-30, per Taylor: activeSteps used to be fetched exactly once,
+    // when the page first loaded (see resolveLatestRun's call site in
+    // loadModel) -- so a page left open while a 06Z/18Z cycle worked its
+    // way toward its full 144h/25-step target (240h/41 steps for 00Z/12Z)
+    // kept showing whatever smaller max lead time was published at load
+    // time, even as the scheduler kept appending real steps to latest.json
+    // on disk for hours afterward. Poll periodically and silently extend
+    // the slider/label as more of the SAME cycle's steps land -- never
+    // shrinks, never resets slider.value, never touches whatever step is
+    // currently on screen. A genuinely new cycle (different cycle_time) is
+    // deliberately left alone here and picked up on the next page load,
+    // not auto-switched into out from under the user.
+    const POLL_NEW_STEPS_MS = 60000;
+    let pollNewStepsTimer = null;
+
+    function startPollingForNewSteps() {
+      if (pollNewStepsTimer !== null) clearInterval(pollNewStepsTimer);
+      pollNewStepsTimer = setInterval(async () => {
+        let result;
+        try {
+          result = await resolveLatestRun(activeModel);
+        } catch {
+          return; // transient fetch/parse failure -- just try again next tick
+        }
+        if (result.cycleTime !== activeCycleTime) return; // new cycle -- next reload picks it up
+        if (result.steps.length <= activeSteps.length) return; // nothing new yet
+        activeSteps = result.steps;
+        if (document.getElementById("time-control").style.display === "none") {
+          // This cycle just went from "only step 0 published" to having a
+          // real range -- safe to run full setup (which resets slider.value
+          // to 0) since step 0 is the only thing that's ever been on screen.
+          setupTimeSlider();
+        } else {
+          document.getElementById("time-slider").max = String(activeSteps.length - 1);
+          updateMaxLeadLabel();
+        }
+      }, POLL_NEW_STEPS_MS);
+    }
+
     function setupTimeSlider() {
       const control = document.getElementById("time-control");
       const slider = document.getElementById("time-slider");
@@ -1762,8 +1806,7 @@
       control.style.display = "block";
       slider.max = String(activeSteps.length - 1);
       slider.value = "0";
-      const maxStepHours = activeSteps[activeSteps.length - 1].step_hours;
-      document.getElementById("time-max-lead").textContent = `max T+${maxStepHours}h`;
+      updateMaxLeadLabel();
       // Reassigning oninput (rather than addEventListener, which would
       // stack a new listener every model load) since loadModel() can run
       // more than once per page life.
@@ -1868,6 +1911,7 @@
         setupTimeSlider();
         showStep(0); // T+0 by default
         unstickNarrowViewportDataLoad();
+        startPollingForNewSteps();
       } catch (err) {
         console.error(err);
         setMeta(`${MODELS[model].label}: ${err.message}`, true);
