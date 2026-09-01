@@ -2,10 +2,13 @@ import os
 from datetime import datetime, timezone
 
 from frontfinder.scheduler.cli import (
+    _cycle_is_complete,
     _cycles_after,
     _most_recent_output_cycle,
+    _steps_present_for_cycle,
     most_recent_completed_cycle,
 )
+from frontfinder.ingest.ecmwf_ifs import target_steps_for_cycle
 
 
 def test_most_recent_completed_cycle_picks_previous_synoptic_hour():
@@ -78,3 +81,29 @@ def test_cycles_after_fills_missed_synoptic_boundaries():
         ("2026-08-22", 6),
         ("2026-08-22", 12),
     ]
+
+
+def test_steps_present_for_cycle_only_counts_matching_cycle(tmp_path):
+    output_root = str(tmp_path)
+    _touch_store(output_root, "theta-e_uv_q", "2026-09-01", 6, step=0)
+    _touch_store(output_root, "theta-e_uv_q", "2026-09-01", 6, step=6)
+    _touch_store(output_root, "theta-e_uv_q", "2026-09-01", 6, step=18)
+    _touch_store(output_root, "theta-e_uv_q", "2026-09-01", 0, step=24)  # different run_hour
+    assert _steps_present_for_cycle(output_root, "theta-e_uv_q", "2026-09-01", 6) == {0, 6, 18}
+
+
+def test_cycle_is_complete_false_when_a_step_stuck_mid_fetch(tmp_path):
+    # Mirrors the 2026-09-01 postmortem: a 06Z cycle wrote f000-f018 then
+    # its fetch of f024 got killed (S3 503 "Slow Down" past the systemd
+    # timeout) -- missing everything from f024 on should read as incomplete.
+    output_root = str(tmp_path)
+    for step in (0, 6, 12, 18):
+        _touch_store(output_root, "theta-e_uv_q", "2026-09-01", 6, step=step)
+    assert not _cycle_is_complete(output_root, "theta-e_uv_q", "2026-09-01", 6)
+
+
+def test_cycle_is_complete_true_once_every_target_step_lands(tmp_path):
+    output_root = str(tmp_path)
+    for step in target_steps_for_cycle(6):  # 06Z caps at 144h -- see ecmwf_ifs.py
+        _touch_store(output_root, "theta-e_uv_q", "2026-09-01", 6, step=step)
+    assert _cycle_is_complete(output_root, "theta-e_uv_q", "2026-09-01", 6)

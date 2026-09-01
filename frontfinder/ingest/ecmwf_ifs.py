@@ -211,12 +211,39 @@ class EcmwfOpenDataSource:
     contending with everyone else's.
     """
 
-    def __init__(self, cache_dir: str = "/tmp/frontfinder_ifs_cache", source: str = "aws"):
+    def __init__(
+        self,
+        cache_dir: str = "/tmp/frontfinder_ifs_cache",
+        source: str = "aws",
+        maximum_retries: int = 5,
+        retry_after: int = 30,
+    ):
         import os
 
         os.makedirs(cache_dir, exist_ok=True)
         self._cache_dir = cache_dir
         self._source = source
+        # 2026-09-01 postmortem: the ecmwf-opendata Client's own default
+        # (maximum_retries=500, retry_after=120) was built for a client that
+        # blocks until the data shows up, not for a systemd oneshot with
+        # TimeoutStartSec=3h -- a step that gets a sustained run of S3 "503
+        # Slow Down" (observed for ~35+ min straight on a freshly-published
+        # step, most likely a thundering-herd of every other open-data
+        # consumer hitting the same brand-new key at once, not anything on
+        # our end: our own request volume is trivial, per the class
+        # docstring) could retry for up to 500*120s = ~16.7h, which the
+        # systemd timeout kills mid-retry -- SIGTERM, no partial progress
+        # saved beyond whatever steps already landed. Bounded to a few
+        # minutes per step instead: a step that's still hot after this
+        # budget gets skipped (run_cycle already treats a failed step as
+        # "log and move on", same as an unpublished 404), and the next
+        # --poll firing (every 5 min) or a later step's own request has a
+        # fresh shot rather than this process camping on one throttled key.
+        # cli.py's poll loop now resumes a cycle missing steps rather than
+        # treating "any output" as done, so nothing is lost by giving up
+        # early here.
+        self._maximum_retries = maximum_retries
+        self._retry_after = retry_after
         self._client = None  # lazy: constructed on first fetch, see _get_client
         self._lat = np.linspace(90.0, -90.0, 721)  # IFS open-data 0.25deg grid, N->S
         self._lon = np.linspace(0.0, 359.75, 1440)
@@ -226,7 +253,11 @@ class EcmwfOpenDataSource:
         if self._client is None:
             from ecmwf.opendata import Client  # local import: not a unit-test dependency
 
-            self._client = Client(source=self._source)
+            self._client = Client(
+                source=self._source,
+                maximum_retries=self._maximum_retries,
+                retry_after=self._retry_after,
+            )
         return self._client
 
     def is_cycle_available(self, cycle: IFSCycle, probe_param: str = "2t") -> bool:

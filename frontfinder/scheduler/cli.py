@@ -31,7 +31,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from frontfinder.config.manifests import THETA_E_UV_Q_MANIFEST  # , MODEL_1702_MANIFEST -- see module docstring
-from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, IFSCycle
+from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, IFSCycle, target_steps_for_cycle
 from frontfinder.inference.engine import KerasPredictor
 from frontfinder.scheduler.retention import prune_old_cache_files, prune_old_output_stores
 from frontfinder.scheduler.run_cycle import ModelRunConfig, run_cycle
@@ -72,6 +72,11 @@ def most_recent_completed_cycle(now: datetime, publish_lag_hours: int = 7) -> tu
 # needs to know WHICH cycle a store belongs to).
 _STORE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2})Z(?:_f\d{3})?\.zarr$")
 
+# Same store-directory naming, but capturing the step number too -- needed
+# by `_steps_present_for_cycle` below to know WHICH steps of a cycle have
+# already landed, not just whether the cycle has been touched at all.
+_STEP_STORE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2})Z_f(\d{3})\.zarr$")
+
 
 def _most_recent_output_cycle(output_root: str, model_name: str) -> tuple[str, int] | None:
     """The most recent (date, run_hour) that `model_name` has ANY published
@@ -95,6 +100,39 @@ def _most_recent_output_cycle(output_root: str, model_name: str) -> tuple[str, i
         if best is None or found > best:
             best = found
     return best
+
+
+def _steps_present_for_cycle(output_root: str, model_name: str, date: str, run_hour: int) -> set[int]:
+    """Which step numbers `model_name` already has a written store for, for
+    this exact (date, run_hour) cycle -- scans the store directory directly
+    (same as `_most_recent_output_cycle`) rather than trusting latest.json,
+    since latest.json gets overwritten the moment a NEWER cycle's first
+    step lands (see `run_cycle._write_latest_pointer`), while the older
+    cycle's already-written stores stay on disk untouched."""
+    model_dir = os.path.join(output_root, model_name)
+    if not os.path.isdir(model_dir):
+        return set()
+    present: set[int] = set()
+    for entry in os.listdir(model_dir):
+        m = _STEP_STORE_NAME_RE.match(entry)
+        if m and m.group(1) == date and int(m.group(2)) == run_hour:
+            present.add(int(m.group(3)))
+    return present
+
+
+def _cycle_is_complete(output_root: str, model_name: str, date: str, run_hour: int) -> bool:
+    """Whether `model_name` has already written every step this cycle's
+    run_hour is expected to publish (see `target_steps_for_cycle`). A cycle
+    that got through some steps and then had its process killed mid-fetch
+    (2026-09-01 postmortem: a step stuck retrying a sustained run of S3
+    "503 Slow Down" past the systemd unit's TimeoutStartSec got SIGTERM'd
+    mid-retry) is incomplete, not done -- `--poll`'s pending-cycle logic
+    below uses this instead of "has ANY output" so a killed cycle gets
+    revisited and its missing tail steps re-attempted, rather than being
+    considered finished forever the moment a newer cycle supersedes it as
+    "most recent"."""
+    target = set(target_steps_for_cycle(run_hour))
+    return target.issubset(_steps_present_for_cycle(output_root, model_name, date, run_hour))
 
 
 def _cycles_after(after: tuple[str, int] | None, current: tuple[str, int]) -> list[tuple[str, int]]:
@@ -205,6 +243,27 @@ def main(argv: list[str] | None = None) -> int:
                 # that never got a cycle's output isn't masked by another model that did
 
         pending = _cycles_after(last_output, current)
+        if last_output is not None and any(
+            not _cycle_is_complete(args.output_root, rc.manifest.name, last_output[0], last_output[1])
+            for rc in run_configs
+        ):
+            # 2026-09-01 postmortem: `_cycles_after` only returns cycles
+            # STRICTLY AFTER last_output -- correct once a cycle is fully
+            # done, wrong if its run_cycle() process got killed partway
+            # through (e.g. a step stuck retrying S3 "503 Slow Down" past
+            # the systemd unit's TimeoutStartSec, SIGTERM'd mid-retry).
+            # Previously that made a killed cycle "done" forever the
+            # moment ANY step landed -- the next poll moved straight on to
+            # the NEXT synoptic cycle and never revisited the gap, which is
+            # exactly how both today's 00Z and 06Z cycles got stuck
+            # capped at whatever step they died on. Re-include it at the
+            # front of the backlog instead, so run_cycle re-runs it and
+            # fills in the missing tail steps -- already-written steps are
+            # cheap no-ops to redo (run_one_model rewrites them, but
+            # `_fetch_grib`'s on-disk GRIB cache makes the fetch side of it
+            # fast) rather than wasted work.
+            logger.info("cycle %s-%02dZ has output but is missing steps -- re-running to fill the gap", *last_output)
+            pending = [last_output] + pending
         if not pending:
             logger.info("cycle %s-%02dZ already has output -- nothing to do", *current)
             return 0
