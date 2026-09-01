@@ -220,11 +220,29 @@ def run_cycle(
         step_entries: list[dict] = []
         for step in steps:
             cycle = IFSCycle(date=cycle_date, run_hour=run_hour, step=step)
-            try:
-                store_path = run_one_model(run_config, source, cycle, output_root)
-            except Exception:
-                logger.exception("model %s failed for cycle %s -- skipping this step", manifest_name, cycle)
-                continue
+            existing_store_path = os.path.join(output_root, manifest_name, _store_name(cycle))
+            if os.path.exists(existing_store_path):
+                # 2026-09-01: cli.py's --poll now re-invokes run_cycle for a
+                # cycle that's missing steps rather than abandoning it (see
+                # its `_cycle_is_complete`), so this function gets called
+                # repeatedly against the SAME cycle as retries land one
+                # throttled step at a time. Without this skip, every retry
+                # re-ran inference for every step already on disk too
+                # (`_fetch_grib`'s cache only ever avoided re-downloading,
+                # not re-inferring) -- a cycle stuck on one hot step got
+                # slower every single poll as more already-done steps piled
+                # up ahead of it. A store directory existing is trusted as
+                # a completed write (run_one_model only creates it via
+                # write_front_pyramid's mode="w", right before logging
+                # "wrote ...").
+                logger.info("model %s step %s already written for cycle %s -- skipping re-run", manifest_name, step, cycle)
+                store_path = existing_store_path
+            else:
+                try:
+                    store_path = run_one_model(run_config, source, cycle, output_root)
+                except Exception:
+                    logger.exception("model %s failed for cycle %s -- skipping this step", manifest_name, cycle)
+                    continue
             store_paths.append(store_path)
             step_entries.append(
                 {"step_hours": step, "valid_time": _valid_time(cycle), "store": _store_name(cycle)}

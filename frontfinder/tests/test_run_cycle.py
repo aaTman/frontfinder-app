@@ -172,6 +172,54 @@ def test_run_cycle_skips_a_failing_step_but_publishes_the_rest(tiny_source, tmp_
     assert [p.split("_f")[-1] for p in results["model_1702"]] == ["000.zarr", "012.zarr"]
 
 
+def test_run_cycle_resume_does_not_refetch_or_rerun_already_written_steps(tiny_source, tmp_path):
+    # Mirrors cli.py's --poll resume path (2026-09-01 postmortem): a cycle
+    # that got through some steps before a transient failure (S3 "503 Slow
+    # Down" in production) gets run_cycle() called again for the SAME
+    # cycle/output_root once the failure clears. That must not re-fetch or
+    # re-run inference for steps already on disk -- only the previously
+    # missing one.
+    fetched_steps: list[int] = []
+
+    class FlakyOnceSource:
+        def __init__(self, inner):
+            self._inner = inner
+            self._failed_once = False
+
+        @property
+        def lat(self):
+            return self._inner.lat
+
+        @property
+        def lon(self):
+            return self._inner.lon
+
+        def fetch_pressure_level(self, variable, level_hpa, cycle):
+            if cycle.step == 6 and not self._failed_once:
+                self._failed_once = True
+                raise RuntimeError("simulated transient throttling (e.g. S3 503 Slow Down)")
+            fetched_steps.append(cycle.step)
+            return self._inner.fetch_pressure_level(variable, level_hpa, cycle)
+
+        def fetch_single_level(self, variable, cycle):
+            return self._inner.fetch_single_level(variable, cycle)
+
+    configs = [
+        ModelRunConfig(manifest=MODEL_1702_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
+    ]
+    source = FlakyOnceSource(tiny_source)
+
+    first = run_cycle(configs, source, "2026-08-19", 0, str(tmp_path), steps=(0, 6, 12))
+    assert [p.split("_f")[-1] for p in first["model_1702"]] == ["000.zarr", "012.zarr"]
+
+    fetched_steps.clear()
+    second = run_cycle(configs, source, "2026-08-19", 0, str(tmp_path), steps=(0, 6, 12))
+    assert [p.split("_f")[-1] for p in second["model_1702"]] == ["000.zarr", "006.zarr", "012.zarr"]
+    # Steps 0 and 12 were already written -- only step 6 should have
+    # actually fetched anything the second time around.
+    assert set(fetched_steps) == {6}
+
+
 def test_run_cycle_defaults_to_target_steps_for_cycle_when_steps_omitted(tiny_source, tmp_path):
     # run_hour=18 -> capped at 144h/25 steps per ecmwf_ifs.target_steps_for_cycle
     # (2026-08-22: corrected from a stale 90h/16-step assumption -- see that
