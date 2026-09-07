@@ -198,6 +198,73 @@ def test_fetch_pressure_level_caches_by_variable_level_and_cycle(tmp_path, monke
     assert calls == [("t", (850,))]
 
 
+class _FakeClient:
+    """Stand-in for ecmwf.opendata.Client.retrieve -- writes `write_bytes` to
+    the requested target (default: nothing, simulating a retrieve() that
+    dies before producing any output) and raises `raises` afterward if set."""
+
+    def __init__(self, write_bytes: bytes = b"", raises: Exception | None = None):
+        self.write_bytes = write_bytes
+        self.raises = raises
+        self.calls = 0
+
+    def retrieve(self, **request):
+        self.calls += 1
+        with open(request["target"], "wb") as f:
+            f.write(self.write_bytes)
+        if self.raises is not None:
+            raise self.raises
+
+
+def test_fetch_grib_removes_a_stale_empty_cache_file_and_refetches(tmp_path, monkeypatch):
+    # 2026-09-07 postmortem: a prior retrieve() that died partway through
+    # (sustained S3 throttling exhausting maximum_retries, or the process
+    # getting killed mid-download) can leave a 0-byte file at the cache
+    # target. Before this fix, `os.path.exists(target)` treated that as a
+    # valid cache hit forever, so the corrupt file was never replaced.
+    source = EcmwfOpenDataSource(cache_dir=str(tmp_path))
+    cycle = IFSCycle(date="2026-08-19", run_hour=12)
+    target = tmp_path / "2026-08-19_12z_f000_t_850.grib2"
+    target.write_bytes(b"")
+
+    fake_client = _FakeClient(write_bytes=b"not-actually-empty")
+    monkeypatch.setattr(source, "_get_client", lambda: fake_client)
+    monkeypatch.setattr("xarray.open_dataset", lambda *a, **k: xr.Dataset(coords={}))
+
+    source._fetch_grib("t", cycle, levelist=[850])
+
+    assert fake_client.calls == 1, "a 0-byte existing cache file should not be trusted as already-fetched"
+    assert target.read_bytes() == b"not-actually-empty"
+
+
+def test_fetch_grib_cleans_up_a_partial_file_left_by_a_failed_retrieve(tmp_path, monkeypatch):
+    source = EcmwfOpenDataSource(cache_dir=str(tmp_path))
+    cycle = IFSCycle(date="2026-08-19", run_hour=12)
+    target = tmp_path / "2026-08-19_12z_f000_t_850.grib2"
+
+    fake_client = _FakeClient(write_bytes=b"", raises=RuntimeError("simulated S3 503 exhausted retries"))
+    monkeypatch.setattr(source, "_get_client", lambda: fake_client)
+
+    with pytest.raises(RuntimeError, match="simulated S3 503"):
+        source._fetch_grib("t", cycle, levelist=[850])
+
+    assert not target.exists(), "a partial file left by a failed retrieve() must not poison future fetches"
+
+
+def test_fetch_grib_raises_and_cleans_up_when_retrieve_produces_an_empty_file(tmp_path, monkeypatch):
+    source = EcmwfOpenDataSource(cache_dir=str(tmp_path))
+    cycle = IFSCycle(date="2026-08-19", run_hour=12)
+    target = tmp_path / "2026-08-19_12z_f000_t_850.grib2"
+
+    fake_client = _FakeClient(write_bytes=b"")  # "succeeds" but writes nothing
+    monkeypatch.setattr(source, "_get_client", lambda: fake_client)
+
+    with pytest.raises(RuntimeError, match="empty file"):
+        source._fetch_grib("t", cycle, levelist=[850])
+
+    assert not target.exists()
+
+
 def test_available_forecast_steps_00z_12z_go_to_360h_with_coarsening_at_150h():
     for run_hour in (0, 12):
         steps = available_forecast_steps(run_hour)

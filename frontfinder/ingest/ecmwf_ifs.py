@@ -325,6 +325,25 @@ class EcmwfOpenDataSource:
             self._cache_dir,
             f"{cycle.date}_{cycle.run_hour:02d}z_f{cycle.step:03d}_{param}_{'-'.join(map(str, levelist or []))}.grib2",
         )
+        # 2026-09-07 postmortem: `client.retrieve()` can leave behind a
+        # 0-byte (or otherwise truncated) `target` file when it gives up
+        # after exhausting `maximum_retries` against a sustained run of S3
+        # "503 Slow Down" (see __init__'s 2026-09-01 postmortem) or the
+        # process gets SIGTERM'd mid-download -- the exception propagates up
+        # to run_cycle's per-step try/except, but nothing ever cleaned up
+        # the partial file it wrote first. The `exists()` check above then
+        # treats that broken file as a valid cache hit FOREVER: every future
+        # call skips retrieve() entirely and hands the same corrupt file to
+        # cfgrib, which throws `EOFError: No valid message found`. Observed
+        # live 2026-09-01 through 2026-09-07 across multiple params/levels
+        # of the same cycle -- each poll fixed the one it was blocked on
+        # only for the next to surface, and the whole pipeline stalled on a
+        # single stuck cycle for days since a cycle missing any step never
+        # counts as complete (see scheduler/cli.py's `_cycle_is_complete`).
+        # Treat an existing empty file as "not cached" so it gets
+        # re-fetched, and never leave a fresh empty/partial one behind.
+        if os.path.exists(target) and os.path.getsize(target) == 0:
+            os.remove(target)
         if not os.path.exists(target):
             request = dict(
                 date=cycle.date.replace("-", ""),
@@ -342,7 +361,15 @@ class EcmwfOpenDataSource:
             )
             if levelist:
                 request["levelist"] = levelist
-            self._get_client().retrieve(**request)
+            try:
+                self._get_client().retrieve(**request)
+            except Exception:
+                if os.path.exists(target):
+                    os.remove(target)
+                raise
+            if os.path.getsize(target) == 0:
+                os.remove(target)
+                raise RuntimeError(f"ecmwf-opendata retrieve() produced an empty file for {target}")
         ds = xr.open_dataset(target, engine="cfgrib")
         # 2026-08-22 fix (Taylor's Seattle-front report): the raw GRIB's
         # native grid starts at longitude 180.0 (confirmed live via
