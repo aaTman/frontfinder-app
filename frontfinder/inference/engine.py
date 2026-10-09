@@ -31,8 +31,17 @@ class KerasPredictor:
     TensorFlow/Keras and the real weights files are available.
     """
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, device: str | None = None):
         import keras  # local import: keeps TensorFlow out of the unit-test path
+
+        # `device`, e.g. "/GPU:0" -- lets cli.py pin each model to its own
+        # physical GPU (2026-09-17, two-3090 host) so both models' inference
+        # can run concurrently instead of contending for the same device.
+        # None (default, and the only thing every deployment used before
+        # GPUs existed here) leaves placement to TensorFlow's own default
+        # device selection -- unchanged behavior for a CPU-only box, or a
+        # single-GPU one where there's nothing to pin against.
+        self._device = device
 
         # Importing this module runs its @register_keras_serializable
         # decorators as a side effect, registering vendored stand-ins for
@@ -46,10 +55,27 @@ class KerasPredictor:
         from frontfinder.inference import keras_compat
 
         keras_compat.ensure_registered()
-        self._model = keras.models.load_model(model_path, compile=False)
+        if self._device is not None:
+            import tensorflow as tf
+
+            # Loading (not just predicting) under the device context matters
+            # -- keras.models.load_model builds the model's variables/layers
+            # as it deserializes, and a variable's device is fixed at
+            # creation, not migrated later just because a later op runs
+            # under a different device scope.
+            with tf.device(self._device):
+                self._model = keras.models.load_model(model_path, compile=False)
+        else:
+            self._model = keras.models.load_model(model_path, compile=False)
 
     def predict_batch(self, patches: np.ndarray) -> np.ndarray:
-        output = self._model.predict(patches, verbose=0)
+        if self._device is not None:
+            import tensorflow as tf
+
+            with tf.device(self._device):
+                output = self._model.predict(patches, verbose=0)
+        else:
+            output = self._model.predict(patches, verbose=0)
         # 2026-08-22 correction: this model's deep-supervision heads are
         # named sup1..sup4 and were WRONGLY assumed to go
         # coarsest-to-finest, with the finest ("full-resolution") head
@@ -72,6 +98,56 @@ class KerasPredictor:
         if isinstance(output, (list, tuple)):
             output = output[0]
         return output
+
+
+class VolumetricKerasPredictor(KerasPredictor):
+    """Adapter for a model trained on volume-shaped input `(batch, H, W,
+    n_levels, n_variables)` instead of the flat `(batch, H, W, n_channels)`
+    every other model here takes -- e.g. spix_wce_loss_modified_dilation.keras's
+    Conv3D architecture (`ModelManifest.volumetric=True`; see fronts'
+    sooner_train_3d.yaml, `volume_inputs: true`).
+
+    The rest of the pipeline (tiling, hemisphere flip, longitude padding)
+    only ever builds/passes around the SAME flat `(H, W, n_channels)` grid
+    used for every model, in `ModelManifest.channel_names()`'s level-major
+    order (pressure-level channels first, level-outer/variable-inner, then
+    single-level channels) -- see `assemble_model_input`'s docstring for why
+    that exact order matters. This class is the only thing that needs to
+    know the model itself wants those same channels reshaped into `(level,
+    variable)` axes: it slices the flat pressure-level block into `(n_levels,
+    n_pressure_vars)` (a plain reshape, since level-major-then-variable-inner
+    IS `(level, variable)` in row-major order already) and broadcasts the
+    trailing single-level channels across the level axis, matching how the
+    training pipeline built its `(lat, lon, level, variable)` batches from
+    the same broadcast-as-constant-columns single-level fields (see
+    `SPIX_WCE_DILATION_MANIFEST`'s comment in manifests.py).
+    """
+
+    def __init__(self, model_path: str, manifest: ModelManifest, device: str | None = None):
+        super().__init__(model_path, device=device)
+        pressure_vars = manifest.pressure_level_variables()
+        levels = manifest.shared_levels
+        if not pressure_vars or levels is None:
+            raise ValueError(f"{manifest.name}: volumetric predictor requires pressure-level variables")
+        self._n_levels = len(levels)
+        self._n_pressure_vars = len(pressure_vars)
+        self._n_single_vars = len(manifest.single_level_variables())
+
+    def predict_batch(self, patches: np.ndarray) -> np.ndarray:
+        n, h, w, _ = patches.shape
+        n_pressure_channels = self._n_levels * self._n_pressure_vars
+        pressure_part = patches[..., :n_pressure_channels].reshape(
+            n, h, w, self._n_levels, self._n_pressure_vars
+        )
+        volume = pressure_part
+        if self._n_single_vars:
+            single_part = patches[..., n_pressure_channels:]
+            single_part = np.broadcast_to(
+                single_part[:, :, :, np.newaxis, :],
+                (n, h, w, self._n_levels, self._n_single_vars),
+            )
+            volume = np.concatenate([pressure_part, single_part], axis=-1)
+        return super().predict_batch(volume)
 
 
 def _run_single_pass(

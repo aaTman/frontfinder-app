@@ -49,9 +49,9 @@ ALL_CLASSES: tuple[str, ...] = (
     "dryline",
 )
 
-# Per Taylor: the model predicts drylines but frontfinder will not serve
-# them. "background" is never served either.
-SERVED_CLASSES: tuple[str, ...] = ("cold", "warm", "stationary", "occluded")
+# Drylines are served as of 2026-10-02 (previously excluded per Taylor).
+# "background" is never served.
+SERVED_CLASSES: tuple[str, ...] = ("cold", "warm", "stationary", "occluded", "dryline")
 
 
 @dataclass(frozen=True)
@@ -85,6 +85,17 @@ class ModelManifest:
     patch_multiple: int = 16
     all_classes: tuple[str, ...] = field(default=ALL_CLASSES)
     served_classes: tuple[str, ...] = field(default=SERVED_CLASSES)
+    # True for a model trained on volume-shaped input (batch, H, W, n_levels,
+    # n_variables) via Conv3D, keeping the level axis intact instead of
+    # flattening level*variable into one channel dim -- e.g.
+    # spix_wce_loss_modified_dilation.keras (see fronts'
+    # configs/sooner_train_3d.yaml, `volume_inputs: true`). `variables` is
+    # still declared the normal (flat) way; `inference.engine.
+    # VolumetricKerasPredictor` is what actually reshapes the assembled flat
+    # (H, W, n_channels) grid into (H, W, n_levels, n_variables) right before
+    # calling the model, so every other stage (tiling, hemisphere flip,
+    # longitude padding, zarr writing) never needs to know the difference.
+    volumetric: bool = False
 
     def __post_init__(self) -> None:
         if len(self.variables) == 0:
@@ -185,9 +196,91 @@ MODEL_1702_MANIFEST = ModelManifest(
     ),
 )
 
+# Trained order confirmed against Taylor's `fronts` repo config
+# (configs/sooner_train_3d.yaml, feat/2.0.0 branch, run_name
+# "spix_wce_loss_modified_dilation_3d_forming_dissipating_and_troughs"):
+# same 4 pressure-level vars/levels as theta-e_uv_q, plus 4 single-level
+# fields the training pipeline broadcasts as constant columns across every
+# level to fill the (level, variable) volume -- see `variables:` and
+# `volume_inputs: true` in that yaml. Verified against the saved
+# .keras file's own baked-in Rescaling (normalization) layer: 4 of its 8
+# per-(level, variable) scale/offset columns vary by level (the pressure
+# vars, in this order) and the other 4 are constant across all 6 levels
+# (the broadcast single-level vars, in this order).
+#
+# geopotential_at_surface (terrain) is NOT available as a native IFS
+# open-data field -- it's invariant/static, not part of the real-time "oper"
+# forecast stream (confirmed against ECMWF's published oper param table: no
+# surface geopotential/orography among its single-level params). Per
+# Taylor's call, this is instead sourced once from the public ARCO-ERA5
+# zarr archive (gs://gcp-public-data-arco-era5, `geopotential_at_surface`,
+# same 0.25deg/721x1440 grid as IFS open-data) and cached locally as a
+# static file -- see ecmwf_ifs.py's STATIC_SINGLE_LEVEL_VARIABLES and
+# EcmwfOpenDataSource.fetch_static.
+SPIX_WCE_DILATION_MANIFEST = ModelManifest(
+    name="spix_wce_loss_modified_dilation",
+    weights_filename="spix_wce_loss_modified_dilation.keras",
+    variables=(
+        VariableSpec("equivalent_potential_temperature", levels=(1000, 925, 850, 700, 500, 300)),
+        VariableSpec("u_component_of_wind", levels=(1000, 925, 850, 700, 500, 300)),
+        VariableSpec("v_component_of_wind", levels=(1000, 925, 850, 700, 500, 300)),
+        VariableSpec("specific_humidity", levels=(1000, 925, 850, 700, 500, 300)),
+        VariableSpec("10m_u_component_of_wind", levels=None),
+        VariableSpec("10m_v_component_of_wind", levels=None),
+        VariableSpec("2m_dewpoint_temperature", levels=None),
+        VariableSpec("geopotential_at_surface", levels=None),
+    ),
+    volumetric=True,
+)
+
+# Output class order of nbs_square_dilation_trof_tt_no_inst.keras, read off
+# the saved model's own compile_config: its PerClassContingencyMetric entries
+# carry each class's `class_index` (hss_CF=1, hss_WF=2, hss_SF=3, hss_OF=4,
+# hss_DL=5, hss_TROF=6, hss_TT=7, hss_INST=8; index 0 is background).
+# Dryline sits at index 5, same as ALL_CLASSES above.
+TROF_TT_CLASSES: tuple[str, ...] = (
+    "background",
+    "cold",
+    "warm",
+    "stationary",
+    "occluded",
+    "dryline",
+    "trough",
+    "tropical_trough",
+    "instability",
+)
+
+# Instability lines ("no_inst" in the filename) are not served.
+TROF_TT_SERVED_CLASSES: tuple[str, ...] = (
+    "cold",
+    "warm",
+    "stationary",
+    "occluded",
+    "dryline",
+    "trough",
+    "tropical_trough",
+)
+
+# Added 2026-10-08. Same 8 inputs, in the same order, as
+# SPIX_WCE_DILATION_MANIFEST, but a 2D UNet3+ (flat 28-channel input, not a
+# Conv3D volume). Verified against the .keras file's baked-in Rescaling
+# layer: 6 groups of 4 level-varying scale/offset columns (theta-e, u, v, q;
+# theta-e's implied minimum rises 214 K -> 283 K from 1000 to 300 hPa), then
+# 4 single-level columns whose implied ranges match 10m u, 10m v, 2m
+# dewpoint (~206-304 K) and surface geopotential (~-900 to ~34000 m2/s2).
+NBS_SQUARE_DILATION_TROF_TT_MANIFEST = ModelManifest(
+    name="nbs_square_dilation_trof_tt_no_inst",
+    weights_filename="nbs_square_dilation_trof_tt_no_inst.keras",
+    variables=SPIX_WCE_DILATION_MANIFEST.variables,
+    all_classes=TROF_TT_CLASSES,
+    served_classes=TROF_TT_SERVED_CLASSES,
+)
+
 MANIFESTS: dict[str, ModelManifest] = {
     THETA_E_UV_Q_MANIFEST.name: THETA_E_UV_Q_MANIFEST,
     MODEL_1702_MANIFEST.name: MODEL_1702_MANIFEST,
+    SPIX_WCE_DILATION_MANIFEST.name: SPIX_WCE_DILATION_MANIFEST,
+    NBS_SQUARE_DILATION_TROF_TT_MANIFEST.name: NBS_SQUARE_DILATION_TROF_TT_MANIFEST,
 }
 
 

@@ -30,7 +30,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
-from frontfinder.config.manifests import THETA_E_UV_Q_MANIFEST  # , MODEL_1702_MANIFEST -- see module docstring
+from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_MANIFEST  # MODEL_1702_MANIFEST -- see module docstring
 from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, IFSCycle, target_steps_for_cycle
 from frontfinder.inference.engine import KerasPredictor
 from frontfinder.scheduler.retention import prune_old_cache_files, prune_old_output_stores
@@ -162,9 +162,13 @@ def _cycles_after(after: tuple[str, int] | None, current: tuple[str, int]) -> li
 
 def build_run_configs(model_dir: str) -> list[ModelRunConfig]:
     return [
+        # 2026-10-08: replaced theta-e_uv_q (_best_loss.keras) as the served
+        # model. Its manifest is still in config/manifests.py.
         ModelRunConfig(
-            manifest=THETA_E_UV_Q_MANIFEST,
-            predictor=KerasPredictor(os.path.join(model_dir, THETA_E_UV_Q_MANIFEST.weights_filename)),
+            manifest=NBS_SQUARE_DILATION_TROF_TT_MANIFEST,
+            predictor=KerasPredictor(
+                os.path.join(model_dir, NBS_SQUARE_DILATION_TROF_TT_MANIFEST.weights_filename)
+            ),
         ),
         # model_1702 disabled -- see module docstring for why. Re-add once
         # the missing 950/900hPa levels have a chosen resolution:
@@ -172,11 +176,14 @@ def build_run_configs(model_dir: str) -> list[ModelRunConfig]:
         #     manifest=MODEL_1702_MANIFEST,
         #     predictor=KerasPredictor(os.path.join(model_dir, MODEL_1702_MANIFEST.weights_filename)),
         # ),
+        # spix_wce_loss_modified_dilation disabled 2026-10-01 to avoid any GPU
+        # use (this deployment runs CPU-only). Its manifest/predictor are still
+        # in the codebase; re-add a ModelRunConfig here to bring it back.
     ]
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run one frontfinder IFS cycle for both models.")
+    parser = argparse.ArgumentParser(description="Run one frontfinder IFS cycle for every active model.")
     parser.add_argument("--model-dir", required=True, help="directory containing the .keras/.h5 weight files")
     parser.add_argument("--output-root", required=True, help="directory to write zarr pyramids + latest.json into")
     parser.add_argument("--cache-dir", default="/tmp/frontfinder_ifs_cache")
@@ -230,51 +237,42 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logger = logging.getLogger(__name__)
 
-    source = EcmwfOpenDataSource(cache_dir=args.cache_dir, source=args.ifs_source)
+    # static_data_dir=args.model_dir: geopotential_at_surface (see
+    # ecmwf_ifs.STATIC_SINGLE_LEVEL_VARIABLES) is a hand-placed static .npy
+    # file, same deployment convention as the .keras weights that already
+    # live in --model-dir on the serving VM.
+    source = EcmwfOpenDataSource(cache_dir=args.cache_dir, source=args.ifs_source, static_data_dir=args.model_dir)
     run_configs = build_run_configs(args.model_dir)
 
     if args.poll:
-        current = most_recent_completed_cycle(datetime.now(timezone.utc), publish_lag_hours=0)
-        last_output = None
-        for rc in run_configs:
-            found = _most_recent_output_cycle(args.output_root, rc.manifest.name)
-            if found is not None and (last_output is None or found < last_output):
-                last_output = found  # the most-BEHIND model sets the floor, so a model
-                # that never got a cycle's output isn't masked by another model that did
-
-        pending = _cycles_after(last_output, current)
-        if last_output is not None and any(
-            not _cycle_is_complete(args.output_root, rc.manifest.name, last_output[0], last_output[1])
-            for rc in run_configs
+        # 2026-10-02: newest PUBLISHED cycle ONLY -- no backlog backfill. The
+        # old oldest-first backfill left the map days behind after any outage
+        # (and S3 "503 Slow Down" retries made each backlog cycle slow), so
+        # missed older cycles are skipped. Walks back from the nominal
+        # current cycle (up to 4 cycles / 24h) to the newest one whose step 0
+        # is actually on the source, so the map shows the latest real data
+        # while the nominal newest cycle is still being published. A
+        # partially-written target cycle is re-run to fill its missing steps
+        # (already-written steps are cheap skips in run_cycle).
+        d = datetime.strptime("%s %02d" % most_recent_completed_cycle(datetime.now(timezone.utc), publish_lag_hours=0), "%Y-%m-%d %H")
+        target = None
+        for _ in range(4):
+            cand = IFSCycle(date=d.strftime("%Y-%m-%d"), run_hour=d.hour, step=0)
+            if source.is_cycle_available(cand):
+                target = cand
+                break
+            logger.info("cycle %s-%02dZ not published yet -- trying the previous cycle", cand.date, cand.run_hour)
+            d -= timedelta(hours=6)
+        if target is None:
+            logger.info("no cycle in the last 24h is published -- will check again next poll")
+            return 0
+        target_date, target_hour = target.date, target.run_hour
+        if all(
+            _cycle_is_complete(args.output_root, rc.manifest.name, target_date, target_hour) for rc in run_configs
         ):
-            # 2026-09-01 postmortem: `_cycles_after` only returns cycles
-            # STRICTLY AFTER last_output -- correct once a cycle is fully
-            # done, wrong if its run_cycle() process got killed partway
-            # through (e.g. a step stuck retrying S3 "503 Slow Down" past
-            # the systemd unit's TimeoutStartSec, SIGTERM'd mid-retry).
-            # Previously that made a killed cycle "done" forever the
-            # moment ANY step landed -- the next poll moved straight on to
-            # the NEXT synoptic cycle and never revisited the gap, which is
-            # exactly how both today's 00Z and 06Z cycles got stuck
-            # capped at whatever step they died on. Re-include it at the
-            # front of the backlog instead, so run_cycle re-runs it and
-            # fills in the missing tail steps -- already-written steps are
-            # cheap no-ops to redo (run_one_model rewrites them, but
-            # `_fetch_grib`'s on-disk GRIB cache makes the fetch side of it
-            # fast) rather than wasted work.
-            logger.info("cycle %s-%02dZ has output but is missing steps -- re-running to fill the gap", *last_output)
-            pending = [last_output] + pending
-        if not pending:
-            logger.info("cycle %s-%02dZ already has output -- nothing to do", *current)
+            logger.info("cycle %s-%02dZ already has output -- nothing to do", target_date, target_hour)
             return 0
-        target_date, target_hour = pending[0]  # oldest missing cycle first -- backfill in order
-        if not source.is_cycle_available(IFSCycle(date=target_date, run_hour=target_hour, step=0)):
-            logger.info("cycle %s-%02dZ not published yet -- will check again next poll", target_date, target_hour)
-            return 0
-        if len(pending) > 1:
-            logger.info("%d cycle(s) missing output -- running oldest first: %s-%02dZ", len(pending), target_date, target_hour)
-        else:
-            logger.info("cycle %s-%02dZ available -- triggering run", target_date, target_hour)
+        logger.info("cycle %s-%02dZ available -- triggering run", target_date, target_hour)
         cycle_date, run_hour = target_date, target_hour
     else:
         cycle_date, run_hour = most_recent_completed_cycle(datetime.now(timezone.utc), args.publish_lag_hours)

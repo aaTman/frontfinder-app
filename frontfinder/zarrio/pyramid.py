@@ -63,6 +63,9 @@ CLASS_STYLE: dict[str, dict] = {
     "warm": {"colormap": "reds", "clim": [0.0, 1.0]},
     "stationary": {"colormap": "greens", "clim": [0.0, 1.0]},
     "occluded": {"colormap": "purples", "clim": [0.0, 1.0]},
+    "dryline": {"colormap": "oranges", "clim": [0.0, 1.0]},
+    "trough": {"colormap": "greys", "clim": [0.0, 1.0]},
+    "tropical_trough": {"colormap": "ylorbr", "clim": [0.0, 1.0]},
 }
 
 
@@ -179,7 +182,7 @@ def write_front_pyramid(pyramid: Pyramid, store_path: str) -> None:
     `@carbonplan/zarr-layer`'s `withMaybeConsolidatedMetadata`) can't
     actually use it to skip per-array metadata fetches -- it still issues
     one `zarr.json` GET per array per pyramid level it opens (up to 6
-    levels x 4 classes) before it can even start fetching data, all on the
+    levels x 5 classes) before it can even start fetching data, all on the
     critical path for first paint. Calling `consolidate_metadata()`
     explicitly (confirmed live against a real store) correctly populates
     the root's `consolidated_metadata.metadata` with every descendant

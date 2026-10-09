@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from frontfinder.config.manifests import THETA_E_UV_Q_MANIFEST, MODEL_1702_MANIFEST
+from frontfinder.config.manifests import SPIX_WCE_DILATION_MANIFEST, THETA_E_UV_Q_MANIFEST, MODEL_1702_MANIFEST
 from frontfinder.ingest.ecmwf_ifs import (
     SIX_HOURLY_STEPS_TO_240H,
     EcmwfOpenDataSource,
@@ -52,6 +52,18 @@ def test_assemble_model_1702_input_has_25_channels(small_source):
     arr = assemble_model_input(MODEL_1702_MANIFEST, small_source, cycle)
     assert arr.shape == (17, 21, 25)
     assert np.all(np.isfinite(arr))
+
+
+def test_assemble_spix_input_has_28_channels_and_resolves_static_terrain(small_source):
+    # 24 pressure-level channels + 4 single-level (3 real IFS fetches + 1
+    # static geopotential_at_surface, which has no live IFS feed -- see
+    # STATIC_SINGLE_LEVEL_VARIABLES).
+    cycle = IFSCycle(date="2026-08-19", run_hour=12)
+    arr = assemble_model_input(SPIX_WCE_DILATION_MANIFEST, small_source, cycle)
+    assert arr.shape == (17, 21, 28)
+    assert np.all(np.isfinite(arr))
+    terrain = small_source.fetch_static("geopotential_at_surface")
+    np.testing.assert_array_equal(arr[..., -1], terrain)  # last channel, per channel_names() order
 
 
 def test_assemble_is_deterministic_for_same_cycle(small_source):
@@ -263,6 +275,44 @@ def test_fetch_grib_raises_and_cleans_up_when_retrieve_produces_an_empty_file(tm
         source._fetch_grib("t", cycle, levelist=[850])
 
     assert not target.exists()
+
+
+# --- EcmwfOpenDataSource.fetch_static (geopotential_at_surface) ---
+
+
+def test_fetch_static_loads_and_caches_from_static_data_dir(tmp_path):
+    source = EcmwfOpenDataSource(cache_dir=str(tmp_path / "cache"), static_data_dir=str(tmp_path))
+    expected = np.arange(721 * 1440, dtype=np.float32).reshape(721, 1440)
+    np.save(tmp_path / "geopotential_at_surface_era5_0p25deg.npy", expected)
+
+    arr = source.fetch_static("geopotential_at_surface")
+    np.testing.assert_array_equal(arr, expected)
+
+    # deleting the file after the first call proves the second call hit the
+    # in-memory cache rather than re-reading from disk.
+    (tmp_path / "geopotential_at_surface_era5_0p25deg.npy").unlink()
+    arr_again = source.fetch_static("geopotential_at_surface")
+    np.testing.assert_array_equal(arr_again, expected)
+
+
+def test_fetch_static_rejects_wrong_grid_shape(tmp_path):
+    source = EcmwfOpenDataSource(cache_dir=str(tmp_path / "cache"), static_data_dir=str(tmp_path))
+    np.save(tmp_path / "geopotential_at_surface_era5_0p25deg.npy", np.zeros((10, 10), dtype=np.float32))
+
+    with pytest.raises(ValueError, match="expected"):
+        source.fetch_static("geopotential_at_surface")
+
+
+def test_fetch_static_raises_without_static_data_dir(tmp_path):
+    source = EcmwfOpenDataSource(cache_dir=str(tmp_path))  # no static_data_dir
+    with pytest.raises(ValueError, match="static_data_dir"):
+        source.fetch_static("geopotential_at_surface")
+
+
+def test_fetch_static_raises_for_unregistered_variable(tmp_path):
+    source = EcmwfOpenDataSource(cache_dir=str(tmp_path / "cache"), static_data_dir=str(tmp_path))
+    with pytest.raises(ValueError, match="no static field file registered"):
+        source.fetch_static("not_a_real_static_field")
 
 
 def test_available_forecast_steps_00z_12z_go_to_360h_with_coarsening_at_150h():

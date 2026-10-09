@@ -111,6 +111,36 @@ def test_run_cycle_continues_after_one_model_fails(tiny_source, tmp_path):
     assert "model_1702" in results
 
 
+def test_run_cycle_processes_step_major_across_models_not_model_major(tiny_source, tmp_path, monkeypatch):
+    # 2026-09-17: run_cycle used to be MODEL-major (every step for model A,
+    # then every step for model B) -- restructured to STEP-major (every
+    # model for step 0, then every model for step 6, ...) so a poll that
+    # gets cut off partway leaves every model's published cycle at roughly
+    # the same step, instead of one model finishing its whole cycle while
+    # another gets zero steps -- see run_cycle's docstring. Pins the actual
+    # call order rather than just the final result shape (which is
+    # order-independent and wouldn't catch a regression back to model-major).
+    import frontfinder.scheduler.run_cycle as run_cycle_module
+
+    calls: list[tuple[int, str]] = []
+    original = run_cycle_module.run_one_model
+
+    def tracking(run_config, source, cycle, output_root):
+        calls.append((cycle.step, run_config.manifest.name))
+        return original(run_config, source, cycle, output_root)
+
+    monkeypatch.setattr(run_cycle_module, "run_one_model", tracking)
+
+    configs = [
+        ModelRunConfig(manifest=THETA_E_UV_Q_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
+        ModelRunConfig(manifest=MODEL_1702_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
+    ]
+    run_cycle(configs, tiny_source, "2026-08-19", 6, str(tmp_path), steps=(0, 6))
+
+    assert [step for step, _ in calls] == [0, 0, 6, 6]
+    assert {name for _, name in calls[:2]} == {"theta-e_uv_q", "model_1702"}
+
+
 def test_run_cycle_runs_every_requested_step_and_writes_them_all(tiny_source, tmp_path):
     configs = [
         ModelRunConfig(manifest=MODEL_1702_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
@@ -218,6 +248,88 @@ def test_run_cycle_resume_does_not_refetch_or_rerun_already_written_steps(tiny_s
     # Steps 0 and 12 were already written -- only step 6 should have
     # actually fetched anything the second time around.
     assert set(fetched_steps) == {6}
+
+
+class SleepingPredictor:
+    """Sleeps `delay_s` in predict_batch -- lets a test assert on wall-clock
+    overlap (or the lack of it) between two models' inference, which is the
+    actual thing `run_cycle`'s concurrent_dispatch is for; asserting on
+    final results alone can't tell concurrent from sequential."""
+
+    def __init__(self, delay_s: float):
+        self._delay_s = delay_s
+
+    def predict_batch(self, patches: np.ndarray) -> np.ndarray:
+        import time
+
+        time.sleep(self._delay_s)
+        n, h, w, _ = patches.shape
+        out = np.random.default_rng(1).random((n, h, w, len(ALL_CLASSES))).astype(np.float32)
+        return out / out.sum(axis=-1, keepdims=True)
+
+
+def test_run_cycle_dispatches_models_concurrently_when_devices_differ(tiny_source, tmp_path):
+    # 2026-09-17 (two-3090 host): models pinned to different devices should
+    # run their inference in parallel, not one after another -- that's the
+    # entire point of pinning them to separate GPUs. Each model calls
+    # predict_batch twice per step (engine.run_tiled_inference's two-pass
+    # hemisphere correction runs regardless of whether the grid actually
+    # has southern rows -- confirmed against this exact fixture/patch size),
+    # so one model's own inference work is ~2*DELAY_S; concurrent means the
+    # two models' ~2*DELAY_S each overlap (~2*DELAY_S total), sequential
+    # means they stack (~4*DELAY_S total). DELAY_S is large enough that
+    # fixed overhead (fetch/tile/write) can't blur that distinction.
+    DELAY_S = 0.5
+    per_model_s = 2 * DELAY_S
+    configs = [
+        ModelRunConfig(
+            manifest=THETA_E_UV_Q_MANIFEST, predictor=SleepingPredictor(DELAY_S), device="/GPU:0",
+            patch_size=64, overlap=16, n_pyramid_levels=2,
+        ),
+        ModelRunConfig(
+            manifest=MODEL_1702_MANIFEST, predictor=SleepingPredictor(DELAY_S), device="/GPU:1",
+            patch_size=64, overlap=16, n_pyramid_levels=2,
+        ),
+    ]
+    import time
+
+    start = time.monotonic()
+    results = run_cycle(configs, tiny_source, "2026-08-19", 6, str(tmp_path), steps=(0,))
+    elapsed = time.monotonic() - start
+
+    assert set(results.keys()) == {"theta-e_uv_q", "model_1702"}
+    assert elapsed < 1.5 * per_model_s, (
+        f"took {elapsed:.2f}s -- expected concurrent (~{per_model_s}s), not sequential (~{2 * per_model_s}s)"
+    )
+
+
+def test_run_cycle_stays_sequential_when_devices_match(tiny_source, tmp_path):
+    # The CPU-only case (both None, every deployment before GPUs existed
+    # here) -- and any case where models share one device -- must stay
+    # sequential: two models on the same device gain nothing from Python
+    # threads (neither's TF op frees that device for the other) and would
+    # just add scheduling overhead.
+    DELAY_S = 0.3
+    per_model_s = 2 * DELAY_S  # see the concurrent test above for why x2
+    configs = [
+        ModelRunConfig(
+            manifest=THETA_E_UV_Q_MANIFEST, predictor=SleepingPredictor(DELAY_S), device=None,
+            patch_size=64, overlap=16, n_pyramid_levels=2,
+        ),
+        ModelRunConfig(
+            manifest=MODEL_1702_MANIFEST, predictor=SleepingPredictor(DELAY_S), device=None,
+            patch_size=64, overlap=16, n_pyramid_levels=2,
+        ),
+    ]
+    import time
+
+    start = time.monotonic()
+    run_cycle(configs, tiny_source, "2026-08-19", 6, str(tmp_path), steps=(0,))
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 1.8 * per_model_s, (
+        f"took {elapsed:.2f}s -- expected sequential (~{2 * per_model_s}s), looked concurrent instead"
+    )
 
 
 def test_run_cycle_defaults_to_target_steps_for_cycle_when_steps_omitted(tiny_source, tmp_path):

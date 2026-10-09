@@ -1,6 +1,8 @@
 import os
 from datetime import datetime, timezone
 
+import pytest
+
 from frontfinder.scheduler.cli import (
     _cycle_is_complete,
     _cycles_after,

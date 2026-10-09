@@ -40,6 +40,27 @@ DIRECT_SINGLE_LEVEL_VARIABLES = {
 # directly -- computed in `derive.py` from the direct variables above.
 DERIVED_VARIABLES = {"equivalent_potential_temperature", "potential_vorticity"}
 
+# Single-level variables that are physically invariant (never change cycle to
+# cycle) and therefore have no real-time IFS open-data field at all -- IFS's
+# "oper" fc stream only publishes actual forecast fields (confirmed against
+# ECMWF's published oper single-level param table: no surface
+# geopotential/orography among them). Sourced once from a static local file
+# instead of a per-cycle fetch -- see `EcmwfOpenDataSource.fetch_static` and
+# `STATIC_FIELD_FILENAMES` below.
+STATIC_SINGLE_LEVEL_VARIABLES = {"geopotential_at_surface"}
+
+# variable -> filename under `EcmwfOpenDataSource`'s `static_data_dir`.
+# geopotential_at_surface_era5_0p25deg.npy: float32 (721, 1440), lat 90..-90,
+# lon 0..359.75 -- same grid convention as `EcmwfOpenDataSource._lat/_lon`.
+# Fetched 2026-09-17 from the public ARCO-ERA5 zarr archive
+# (gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3,
+# `geopotential_at_surface` variable, one arbitrary valid time index --
+# confirmed invariant by comparing two widely-separated time indices
+# byte-for-byte equal). Units m**2 s**-2, matching what the model's
+# `equivalent_potential_temperature`/etc. pipeline expects (ERA5 convention,
+# NOT geopotential height in meters).
+STATIC_FIELD_FILENAMES = {"geopotential_at_surface": "geopotential_at_surface_era5_0p25deg.npy"}
+
 # ERA5-style variable name -> IFS open-data GRIB shortname, for the real
 # network client (see EcmwfOpenDataSource).
 ERA5_NAME_TO_IFS_SHORTNAME = {
@@ -130,6 +151,12 @@ class IFSFieldSource(Protocol):
 
     def fetch_single_level(self, variable: str, cycle: IFSCycle) -> np.ndarray: ...
 
+    def fetch_static(self, variable: str) -> np.ndarray:
+        """A physically-invariant single-level field with no real-time IFS
+        feed (see `STATIC_SINGLE_LEVEL_VARIABLES`) -- no `cycle` argument
+        since it's the same field for every cycle."""
+        ...
+
 
 class FakeIFSFieldSource:
     """Deterministic synthetic field source for tests -- no network."""
@@ -176,6 +203,14 @@ class FakeIFSFieldSource:
                 self._cache[key] = self._grid(0.0, 5.0)
         return self._cache[key]
 
+    def fetch_static(self, variable: str) -> np.ndarray:
+        key = ("static", variable)
+        if key not in self._cache:
+            # Deterministic synthetic terrain-like field -- real magnitude
+            # doesn't matter for tests, only shape/determinism.
+            self._cache[key] = self._grid(1500.0, 3000.0)
+        return self._cache[key]
+
 
 class EcmwfOpenDataSource:
     """Real network-backed IFSFieldSource, using the `ecmwf-opendata` client
@@ -217,12 +252,39 @@ class EcmwfOpenDataSource:
         source: str = "aws",
         maximum_retries: int = 5,
         retry_after: int = 30,
+        static_data_dir: str | None = None,
     ):
         import os
+        import threading
 
         os.makedirs(cache_dir, exist_ok=True)
         self._cache_dir = cache_dir
         self._source = source
+        # 2026-09-17: guards `_fetch_grib`'s check-then-download-then-write
+        # sequence for a given target file. Was safe as long as every model
+        # sharing this source ran strictly sequentially (true for every
+        # deployment until now) -- run_cycle.py can now dispatch multiple
+        # models concurrently (see its `concurrent_dispatch`, added the same
+        # day for GPU-pinned models), and theta-e_uv_q/spix request several
+        # of the SAME (param, levelist, cycle, step) GRIB files (identical
+        # pressure-level variables/levels -- see both manifests). Without a
+        # lock, two threads could both see the target missing and both call
+        # `retrieve()` against the same path at once -- one process writing
+        # over the other mid-write, which `_fetch_grib`'s 0-byte/partial-file
+        # cleanup was never designed to detect (that guards against a killed
+        # *process*, not two live writers). One lock per target path (not a
+        # single global lock) so genuinely different files still fetch in
+        # parallel.
+        self._fetch_locks: dict[str, threading.Lock] = {}
+        self._fetch_locks_guard = threading.Lock()
+        # Directory holding STATIC_FIELD_FILENAMES' .npy files (e.g.
+        # geopotential_at_surface) -- cli.py passes --model-dir, since that's
+        # already the one directory this pipeline expects to exist on the
+        # serving VM with hand-placed binary inputs, same as the .keras
+        # weights themselves. None is fine as long as nothing actually
+        # requests a static field (fetch_static raises then, not __init__).
+        self._static_data_dir = static_data_dir
+        self._static_field_cache: dict[str, np.ndarray] = {}
         # 2026-09-01 postmortem: the ecmwf-opendata Client's own default
         # (maximum_retries=500, retry_after=120) was built for a client that
         # blocks until the data shows up, not for a systemd oneshot with
@@ -310,7 +372,6 @@ class EcmwfOpenDataSource:
 
         import xarray as xr
 
-        key = (param, tuple(levelist or ()), cycle.date, cycle.run_hour, cycle.step)
         # 2026-08-21: the target filename didn't used to include cycle.step
         # at all, which was a latent cache-collision bug -- harmless while
         # every request was step=0, but the moment the pipeline started
@@ -325,6 +386,26 @@ class EcmwfOpenDataSource:
             self._cache_dir,
             f"{cycle.date}_{cycle.run_hour:02d}z_f{cycle.step:03d}_{param}_{'-'.join(map(str, levelist or []))}.grib2",
         )
+        with self._lock_for(target):
+            return self._fetch_grib_locked(target, param, cycle, levelist)
+
+    def _lock_for(self, target: str) -> "threading.Lock":
+        import threading
+
+        with self._fetch_locks_guard:
+            lock = self._fetch_locks.get(target)
+            if lock is None:
+                lock = threading.Lock()
+                self._fetch_locks[target] = lock
+            return lock
+
+    def _fetch_grib_locked(
+        self, target: str, param: str, cycle: IFSCycle, levelist: list[int] | None
+    ) -> "xr.Dataset":
+        import os
+
+        import xarray as xr
+
         # 2026-09-07 postmortem: `client.retrieve()` can leave behind a
         # 0-byte (or otherwise truncated) `target` file when it gives up
         # after exhausting `maximum_retries` against a sustained run of S3
@@ -427,6 +508,27 @@ class EcmwfOpenDataSource:
             self._field_cache[key] = ds[data_var].values
         return self._field_cache[key]
 
+    def fetch_static(self, variable: str) -> np.ndarray:
+        import os
+
+        if variable not in self._static_field_cache:
+            filename = STATIC_FIELD_FILENAMES.get(variable)
+            if filename is None:
+                raise ValueError(f"no static field file registered for {variable!r}")
+            if self._static_data_dir is None:
+                raise ValueError(
+                    f"static field {variable!r} requested but no static_data_dir was configured"
+                )
+            path = os.path.join(self._static_data_dir, filename)
+            arr = np.load(path)
+            expected_shape = (len(self._lat), len(self._lon))
+            if arr.shape != expected_shape:
+                raise ValueError(
+                    f"static field {variable!r} at {path} has shape {arr.shape}, expected {expected_shape}"
+                )
+            self._static_field_cache[variable] = arr.astype(np.float32)
+        return self._static_field_cache[variable]
+
 
 def _resolve_direct_variable_at_level(
     var_name: str, level_hpa: int, source: IFSFieldSource, cycle: IFSCycle
@@ -505,7 +607,7 @@ def assemble_model_input(
     Returns an array of shape (len(source.lat), len(source.lon), manifest.n_channels),
     with channels ordered exactly as `manifest.channel_names()` describes.
     """
-    known_direct = DIRECT_PRESSURE_LEVEL_VARIABLES | DIRECT_SINGLE_LEVEL_VARIABLES
+    known_direct = DIRECT_PRESSURE_LEVEL_VARIABLES | DIRECT_SINGLE_LEVEL_VARIABLES | STATIC_SINGLE_LEVEL_VARIABLES
     for var in manifest.variables:
         if var.name not in known_direct and var.name not in DERIVED_VARIABLES:
             raise ValueError(
@@ -535,7 +637,10 @@ def assemble_model_input(
                     channels.append(_resolve_direct_variable_at_level(var.name, level, source, cycle))
 
     for var in manifest.single_level_variables():
-        channels.append(_resolve_direct_single_level_variable(var.name, source, cycle))
+        if var.name in STATIC_SINGLE_LEVEL_VARIABLES:
+            channels.append(source.fetch_static(var.name))
+        else:
+            channels.append(_resolve_direct_single_level_variable(var.name, source, cycle))
 
     stacked = np.stack(channels, axis=-1)
     expected_shape = (len(source.lat), len(source.lon), manifest.n_channels)

@@ -3,8 +3,10 @@ import pytest
 from frontfinder.config.manifests import (
     ALL_CLASSES,
     SERVED_CLASSES,
+    SPIX_WCE_DILATION_MANIFEST,
     THETA_E_UV_Q_MANIFEST,
     MODEL_1702_MANIFEST,
+    NBS_SQUARE_DILATION_TROF_TT_MANIFEST,
     ModelManifest,
     VariableSpec,
     get_manifest,
@@ -81,10 +83,10 @@ def test_model_1702_single_level_vars_have_bare_channel_names():
     assert "surface_pressure_1000" not in names
 
 
-def test_served_classes_excludes_dryline_and_background():
-    assert "dryline" not in SERVED_CLASSES
+def test_served_classes_includes_dryline_but_not_background():
+    assert "dryline" in SERVED_CLASSES
     assert "background" not in SERVED_CLASSES
-    assert set(SERVED_CLASSES) == {"cold", "warm", "stationary", "occluded"}
+    assert set(SERVED_CLASSES) == {"cold", "warm", "stationary", "occluded", "dryline"}
     assert set(SERVED_CLASSES).issubset(set(ALL_CLASSES))
 
 
@@ -94,9 +96,45 @@ def test_served_class_indices_align_with_all_classes_order():
     assert names_at_idx == list(SERVED_CLASSES)
 
 
+def test_spix_manifest_flat_channel_count_matches_training_config():
+    # sooner_train_3d.yaml: same 4 pressure-level vars x 6 levels (24) as
+    # theta-e_uv_q, plus 4 single-level vars the training pipeline broadcasts
+    # across the level axis in volume mode -- flat/assembled count is still
+    # 24 + 4 = 28 (the broadcast only happens at predict time, in
+    # VolumetricKerasPredictor, not in the assembled grid itself).
+    assert SPIX_WCE_DILATION_MANIFEST.n_channels == 28
+    assert SPIX_WCE_DILATION_MANIFEST.volumetric is True
+    assert THETA_E_UV_Q_MANIFEST.volumetric is False
+
+
+def test_spix_manifest_variable_order_matches_training_config_for_volume_reshape():
+    # VolumetricKerasPredictor's reshape assumes pressure vars come first (in
+    # this exact order) and single-level vars last, matching
+    # sooner_train_3d.yaml's `variables:` list -- get this wrong and the
+    # model's baked-in per-(level,variable) normalization silently applies to
+    # the wrong channel again (the same bug class as the 2026-08-20
+    # level-major/variable-major postmortem for the flat model).
+    pressure_names = [v.name for v in SPIX_WCE_DILATION_MANIFEST.pressure_level_variables()]
+    single_names = [v.name for v in SPIX_WCE_DILATION_MANIFEST.single_level_variables()]
+    assert pressure_names == [
+        "equivalent_potential_temperature",
+        "u_component_of_wind",
+        "v_component_of_wind",
+        "specific_humidity",
+    ]
+    assert single_names == [
+        "10m_u_component_of_wind",
+        "10m_v_component_of_wind",
+        "2m_dewpoint_temperature",
+        "geopotential_at_surface",
+    ]
+    assert SPIX_WCE_DILATION_MANIFEST.shared_levels == (1000, 925, 850, 700, 500, 300)
+
+
 def test_get_manifest_looks_up_by_name():
     assert get_manifest("theta-e_uv_q") is THETA_E_UV_Q_MANIFEST
     assert get_manifest("model_1702") is MODEL_1702_MANIFEST
+    assert get_manifest("spix_wce_loss_modified_dilation") is SPIX_WCE_DILATION_MANIFEST
 
 
 def test_get_manifest_unknown_model_raises():
@@ -140,3 +178,25 @@ def test_manifest_rejects_served_class_not_in_all_classes():
             all_classes=("background", "cold"),
             served_classes=("cold", "warm"),
         )
+
+
+def test_nbs_trof_tt_is_flat_28_channels_with_9_output_classes():
+    # nbs_square_dilation_trof_tt_no_inst.keras: Input batch_shape
+    # [None, None, None, 28], 9-filter sup*_Conv2D output heads.
+    m = NBS_SQUARE_DILATION_TROF_TT_MANIFEST
+    assert m.n_channels == 28
+    assert not m.volumetric
+    assert m.channel_names() == SPIX_WCE_DILATION_MANIFEST.channel_names()
+    assert len(m.all_classes) == 9
+
+
+def test_nbs_trof_tt_class_indices_match_saved_metric_indices():
+    # class_index values from the saved model's PerClassContingencyMetric
+    # entries (hss_CF=1 ... hss_INST=8).
+    m = NBS_SQUARE_DILATION_TROF_TT_MANIFEST
+    assert m.served_classes == (
+        "cold", "warm", "stationary", "occluded", "dryline", "trough", "tropical_trough",
+    )
+    assert m.served_class_indices() == [1, 2, 3, 4, 5, 6, 7]
+    assert "instability" not in m.served_classes
+    assert get_manifest("nbs_square_dilation_trof_tt_no_inst") is m

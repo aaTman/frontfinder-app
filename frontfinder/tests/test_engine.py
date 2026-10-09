@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from frontfinder.config.manifests import ALL_CLASSES, MODEL_1702_MANIFEST
-from frontfinder.inference.engine import run_tiled_inference
+from frontfinder.config.manifests import ALL_CLASSES, MODEL_1702_MANIFEST, ModelManifest, VariableSpec
+from frontfinder.inference.engine import VolumetricKerasPredictor, run_tiled_inference
 
 
 class ConstantPredictor:
@@ -188,6 +188,97 @@ def test_run_tiled_inference_is_unaffected_by_lat_deg_when_all_northern():
     np.testing.assert_allclose(with_lat, without_lat)
 
 
+def test_volumetric_keras_predictor_reshapes_flat_channels_into_level_variable_volume():
+    # VolumetricKerasPredictor must turn the SAME flat, level-major channel
+    # layout every other model gets (see ModelManifest.channel_names()) into
+    # (level, variable) axes: the pressure-level block is a plain reshape
+    # (level-major-then-variable-inner IS (level, variable) in row-major
+    # order already), and the single-level channels get broadcast identically
+    # across every level -- matching how the training pipeline built its
+    # volume batches (see SPIX_WCE_DILATION_MANIFEST's comment).
+    manifest = ModelManifest(
+        name="fake_volumetric",
+        weights_filename="fake.keras",
+        variables=(
+            VariableSpec("a", levels=(1000, 500)),
+            VariableSpec("b", levels=(1000, 500)),
+            VariableSpec("c", levels=None),
+            VariableSpec("d", levels=None),
+        ),
+        volumetric=True,
+    )
+    # channel_names(): a_1000, b_1000, a_500, b_500, c, d
+    assert manifest.channel_names() == ["a_1000", "b_1000", "a_500", "b_500", "c", "d"]
+
+    predictor = VolumetricKerasPredictor.__new__(VolumetricKerasPredictor)  # bypass load_model()
+    predictor._device = None
+    predictor._n_levels = 2
+    predictor._n_pressure_vars = 2
+    predictor._n_single_vars = 2
+
+    captured = {}
+
+    class FakeModel:
+        def predict(self, x, verbose=0):
+            captured["input"] = x
+            return np.zeros((x.shape[0], x.shape[1], x.shape[2], len(ALL_CLASSES)), dtype=np.float32)
+
+    predictor._model = FakeModel()
+
+    n, h, w = 1, 2, 2
+    patches = np.zeros((n, h, w, 6), dtype=np.float32)
+    patches[..., 0] = 10  # a_1000
+    patches[..., 1] = 20  # b_1000
+    patches[..., 2] = 11  # a_500
+    patches[..., 3] = 21  # b_500
+    patches[..., 4] = 100  # c (single-level)
+    patches[..., 5] = 200  # d (single-level)
+
+    predictor.predict_batch(patches)
+
+    volume = captured["input"]
+    assert volume.shape == (n, h, w, 2, 4)
+    np.testing.assert_allclose(volume[0, 0, 0, 0], [10, 20, 100, 200])  # level 1000: a,b,c,d
+    np.testing.assert_allclose(volume[0, 0, 0, 1], [11, 21, 100, 200])  # level 500: single-level vars unchanged
+
+
+def test_keras_predictor_wraps_load_and_predict_in_the_given_device(monkeypatch):
+    # 2026-09-17 (two-3090 host): cli.py pins each model to its own GPU via
+    # `device=`. Uses a real "/CPU:0" (present on every machine, unlike a
+    # GPU) so this actually exercises tf.device()'s real context manager --
+    # not just a mock -- while still proving KerasPredictor requests THAT
+    # device for both load_model() and predict(), which is the part that
+    # would misroute inference onto the wrong physical device if it
+    # regressed.
+    pytest.importorskip("keras")
+    import keras
+    import tensorflow as tf
+
+    from frontfinder.inference.engine import KerasPredictor
+
+    inputs = keras.Input(shape=(None, None, 2))
+    outputs = keras.layers.Conv2D(2, 1, activation="softmax")(inputs)
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    model_path = "/tmp/frontfinder_test_tiny_device_model.keras"
+    model.save(model_path)
+
+    requested_devices: list[str] = []
+    real_tf_device = tf.device
+
+    def recording_device(name):
+        requested_devices.append(name)
+        return real_tf_device(name)
+
+    monkeypatch.setattr(tf, "device", recording_device)
+
+    predictor = KerasPredictor(model_path, device="/CPU:0")
+    rng = np.random.default_rng(0)
+    patch = rng.standard_normal((1, 8, 8, 2)).astype(np.float32)
+    predictor.predict_batch(patch)
+
+    assert requested_devices == ["/CPU:0", "/CPU:0"]  # once for load_model, once for predict
+
+
 def test_keras_predictor_serves_the_first_deep_supervision_head_not_the_last():
     # Regression test for the 2026-08-22 "wide flat bar" bug: KerasPredictor
     # used to take output[-1] on the (wrong) assumption that a deep
@@ -220,6 +311,7 @@ def test_keras_predictor_serves_the_first_deep_supervision_head_not_the_last():
 
     predictor = KerasPredictor.__new__(KerasPredictor)  # bypass load_model(); inject the model directly
     predictor._model = model
+    predictor._device = None
 
     rng = np.random.default_rng(0)
     patch = rng.standard_normal((1, 16, 16, 3)).astype(np.float32)

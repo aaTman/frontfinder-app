@@ -1,5 +1,5 @@
-"""Orchestrates one IFS cycle's worth of frontfinder work: for each of the two
-models, and for every published forecast lead time ("step") that cycle
+"""Orchestrates one IFS cycle's worth of frontfinder work: for each configured
+model, and for every published forecast lead time ("step") that cycle
 carries, fetch/assemble input -> tiled inference -> zarr pyramid write.
 
 Intended to run as a scheduled batch job (systemd timer / cron) on the
@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -47,6 +48,14 @@ logger = logging.getLogger(__name__)
 class ModelRunConfig:
     manifest: ModelManifest
     predictor: Predictor
+    # Mirrors whatever device (e.g. "/GPU:0") `predictor` was itself built
+    # with -- run_cycle uses this (not any private attribute on `predictor`)
+    # to decide whether models can safely run concurrently for a given step;
+    # see `run_cycle`'s docstring. None (every deployment before the
+    # two-3090 host) means "let run_cycle process this model exactly like
+    # every other None-device model: sequentially, in list order" -- the
+    # original, still-default behavior.
+    device: str | None = None
     patch_size: int = 256
     # 2026-08-26: raised from 32 -- with a 256px patch and 32px overlap, the
     # row-tile seam between the first two latitude tiles (row_start=0 and
@@ -209,50 +218,113 @@ def run_cycle(
     succeeded, in ascending step order; a model with zero successful steps
     is omitted entirely (mirrors the old single-step "omit on total
     failure" behavior).
+
+    2026-09-17: iterates STEP-major (every configured model for step 0, then
+    every model for step 6, ...) rather than the original MODEL-major order
+    (every step for model A, then every step for model B). Two reasons:
+
+    1. Shared input variables get fetched once per step, not once per
+       (step, model). `theta-e_uv_q` and `spix_wce_loss_modified_dilation`
+       both need identical pressure-level fields (u/v/specific_humidity/the
+       temperature+humidity pair equivalent_potential_temperature derives
+       from) at the same 6 levels -- see both manifests in manifests.py.
+       `assemble_model_input` always resolves these through the same
+       `source` object's own per-(variable, level, cycle) cache
+       (`EcmwfOpenDataSource._field_cache`, never evicted for the life of
+       one `run_cycle` call), so processing every model for a step back to
+       back means the second (and any further) model's call is a hot
+       in-memory hit for every field the first model already resolved --
+       only fields genuinely unique to that model (spix's 10m wind/2m
+       dewpoint/terrain) do any new work. Model-major order still got this
+       for free too, since the same `source` persists across the whole
+       call -- but only within a single `run_cycle` invocation that
+       actually reaches every model for a given step; see point 2 for why
+       that reach mattered.
+    2. A poll can time out (systemd's TimeoutStartSec) or fail partway
+       through -- model-major order meant a cut-off run could finish EVERY
+       step for the first model and ZERO steps for the second, so their
+       `latest.json`s (and therefore the webapp's shared time slider, once
+       more than one model is selected there) drifted out of step by up to
+       a whole cycle's worth of runtime. Step-major order means a cut-off
+       run leaves every model at roughly the same step, keeping their
+       published cycles in lockstep.
+
+    Per-model bookkeeping (already-written skip, ascending order, one
+    model's exception never blocking another's, progressive `latest.json`
+    writes) is unchanged -- only which step each model tackles next.
+
+    2026-09-17: within one step, the per-model work (`_process_one_model`
+    below) runs CONCURRENTLY -- via a thread pool, one worker per model --
+    whenever `run_configs` name more than one distinct `device` (e.g. two
+    models pinned to two different GPUs: real overlap, since each model's
+    TensorFlow graph runs on its own physical device). When every
+    `run_config.device` is the same value (including the all-`None`/CPU
+    case every deployment used before GPUs existed here), work stays
+    sequential in list order -- unchanged from before this date, and
+    deliberately so: two models fighting over the SAME CPU cores under
+    Python threads would just add contention/GIL overhead for no real
+    parallelism, since neither TF op releases the GIL for the other to make
+    progress on the same device. `_write_latest_pointer` is only ever
+    called from the main thread, after a step's results are all in (each
+    model writes its own, differently-named file, so there's no
+    cross-model collision to guard against either way).
     """
     if steps is None:
         steps = target_steps_for_cycle(run_hour)
 
-    results: dict[str, list[str]] = {}
-    for run_config in run_configs:
+    store_paths: dict[str, list[str]] = {rc.manifest.name: [] for rc in run_configs}
+    step_entries: dict[str, list[dict]] = {rc.manifest.name: [] for rc in run_configs}
+    concurrent_dispatch = len({rc.device for rc in run_configs}) > 1
+
+    def process_one_model(run_config: ModelRunConfig) -> tuple[str, str | None]:
         manifest_name = run_config.manifest.name
-        store_paths: list[str] = []
-        step_entries: list[dict] = []
-        for step in steps:
-            cycle = IFSCycle(date=cycle_date, run_hour=run_hour, step=step)
-            existing_store_path = os.path.join(output_root, manifest_name, _store_name(cycle))
-            if os.path.exists(existing_store_path):
-                # 2026-09-01: cli.py's --poll now re-invokes run_cycle for a
-                # cycle that's missing steps rather than abandoning it (see
-                # its `_cycle_is_complete`), so this function gets called
-                # repeatedly against the SAME cycle as retries land one
-                # throttled step at a time. Without this skip, every retry
-                # re-ran inference for every step already on disk too
-                # (`_fetch_grib`'s cache only ever avoided re-downloading,
-                # not re-inferring) -- a cycle stuck on one hot step got
-                # slower every single poll as more already-done steps piled
-                # up ahead of it. A store directory existing is trusted as
-                # a completed write (run_one_model only creates it via
-                # write_front_pyramid's mode="w", right before logging
-                # "wrote ...").
-                logger.info("model %s step %s already written for cycle %s -- skipping re-run", manifest_name, step, cycle)
-                store_path = existing_store_path
-            else:
-                try:
-                    store_path = run_one_model(run_config, source, cycle, output_root)
-                except Exception:
-                    logger.exception("model %s failed for cycle %s -- skipping this step", manifest_name, cycle)
-                    continue
-            store_paths.append(store_path)
-            step_entries.append(
+        existing_store_path = os.path.join(output_root, manifest_name, _store_name(cycle))
+        if os.path.exists(existing_store_path):
+            # 2026-09-01: cli.py's --poll now re-invokes run_cycle for a
+            # cycle that's missing steps rather than abandoning it (see
+            # its `_cycle_is_complete`), so this function gets called
+            # repeatedly against the SAME cycle as retries land one
+            # throttled step at a time. Without this skip, every retry
+            # re-ran inference for every step already on disk too
+            # (`_fetch_grib`'s cache only ever avoided re-downloading,
+            # not re-inferring) -- a cycle stuck on one hot step got
+            # slower every single poll as more already-done steps piled
+            # up ahead of it. A store directory existing is trusted as
+            # a completed write (run_one_model only creates it via
+            # write_front_pyramid's mode="w", right before logging
+            # "wrote ...").
+            logger.info("model %s step %s already written for cycle %s -- skipping re-run", manifest_name, step, cycle)
+            return manifest_name, existing_store_path
+        try:
+            return manifest_name, run_one_model(run_config, source, cycle, output_root)
+        except Exception:
+            logger.exception("model %s failed for cycle %s -- skipping this step", manifest_name, cycle)
+            return manifest_name, None
+
+    for step in steps:
+        cycle = IFSCycle(date=cycle_date, run_hour=run_hour, step=step)
+        if concurrent_dispatch:
+            with ThreadPoolExecutor(max_workers=len(run_configs)) as pool:
+                step_results = list(pool.map(process_one_model, run_configs))
+        else:
+            step_results = [process_one_model(rc) for rc in run_configs]
+
+        for manifest_name, store_path in step_results:
+            if store_path is None:
+                continue
+            store_paths[manifest_name].append(store_path)
+            step_entries[manifest_name].append(
                 {"step_hours": step, "valid_time": _valid_time(cycle), "store": _store_name(cycle)}
             )
             # Publish as soon as this step lands, not after the whole cycle
             # -- see the postmortem above.
-            _write_latest_pointer(output_root, manifest_name, cycle, step_entries)
+            _write_latest_pointer(output_root, manifest_name, cycle, step_entries[manifest_name])
 
-        if store_paths:
-            results[manifest_name] = store_paths
+    results: dict[str, list[str]] = {}
+    for run_config in run_configs:
+        manifest_name = run_config.manifest.name
+        if store_paths[manifest_name]:
+            results[manifest_name] = store_paths[manifest_name]
         else:
             logger.error("model %s produced zero successful steps for cycle %s-%02dZ", manifest_name, cycle_date, run_hour)
 

@@ -55,7 +55,7 @@ def test_front_fields_rejects_shape_mismatch():
 def test_build_level0_dataset_has_only_served_classes(small_fields):
     ds = build_level0_dataset(small_fields, MODEL_1702_MANIFEST)
     assert set(ds.data_vars) == set(MODEL_1702_MANIFEST.served_classes)
-    assert "dryline" not in ds.data_vars
+    assert "dryline" in ds.data_vars
     assert "background" not in ds.data_vars
 
 
