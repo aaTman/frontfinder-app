@@ -25,16 +25,17 @@ test("hexToRgb01 converts pure primaries and grays", () => {
 
 test("CLASS_STYLE has one distinct color per class, colorblind-safe order", () => {
   const classes = Object.keys(CLASS_STYLE);
-  assert.deepEqual(classes, ["cold", "warm", "stationary", "occluded"]);
+  assert.deepEqual(classes, ["cold", "warm", "stationary", "occluded", "dryline", "trough", "tropical_trough"]);
   const colors = classes.map((cls) => CLASS_STYLE[cls].color);
   assert.equal(new Set(colors).size, colors.length, "every class needs a distinct color");
   for (const color of colors) {
     assert.match(color, /^#[0-9a-f]{6}$/, `${color} must be a lowercase 6-digit hex string`);
   }
   // Locks in the specific colorblind-safe palette (dark-mode slots 1, 2, 3,
-  // 7 of the dataviz skill's reference categorical order) so a future edit
-  // that silently reverts to a non-validated set fails loudly.
-  assert.deepEqual(colors, ["#3987e5", "#d95926", "#199e70", "#9085e9"]);
+  // 7, 4 of the dataviz skill's reference categorical order, plus the two
+  // CVD-searched trough colors -- see lib.js) so a future edit that silently
+  // reverts to a non-validated set fails loudly.
+  assert.deepEqual(colors, ["#3987e5", "#d95926", "#199e70", "#9085e9", "#c98500", "#992288", "#bb1111"]);
 });
 
 test("bandOpacityForBin and binForBandOpacity round-trip for every bin", () => {

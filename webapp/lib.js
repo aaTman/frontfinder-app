@@ -14,11 +14,21 @@
 // accepted because every class also carries a legend swatch + text label +
 // independent checkbox toggle, exactly the "secondary encoding" the skill
 // requires to accept the 6-8 CVD band.
+//
+// 2026-10-08: trough (#992288) and tropical_trough (#bb1111) added for
+// nbs_square_dilation_trof_tt_no_inst. The reference palette's remaining
+// slots (magenta/green/red) all collapse against aqua or orange under CVD
+// simulation, so these were searched for directly: every pair across all
+// seven classes stays >= 9.5 OKLab dE under normal, protan, deutan and
+// tritan simulation (trough alone >= 15.6), with OKLCH L ~0.48-0.50.
 export const CLASS_STYLE = {
   cold: { color: "#3987e5", label: "Cold" },
   warm: { color: "#d95926", label: "Warm" },
   stationary: { color: "#199e70", label: "Stationary" },
   occluded: { color: "#9085e9", label: "Occluded" },
+  dryline: { color: "#c98500", label: "Dryline" },
+  trough: { color: "#992288", label: "Trough" },
+  tropical_trough: { color: "#bb1111", label: "Tropical trough" },
 };
 
 // Raw-probability breakpoints for the filled-contour look. See index.html's
