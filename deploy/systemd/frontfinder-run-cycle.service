@@ -1,5 +1,5 @@
 [Unit]
-Description=frontfinder: run one IFS cycle for both models
+Description=frontfinder: run one IFS cycle
 Wants=network-online.target
 After=network-online.target
 
@@ -14,15 +14,43 @@ Type=oneshot
 User=root
 WorkingDirectory=/srv/frontfinder-app
 Environment=PYTHONUNBUFFERED=1
+# 2026-10-01: CPU-only -- hide all GPUs from TensorFlow so nothing can touch one.
+Environment=CUDA_VISIBLE_DEVICES=-1
+# 2026-10-02: cap CPU use so CPU-only inference can't saturate the 24-core
+# host (load avg hit ~120 and lagged everything else on the box).
+Environment=TF_NUM_INTRAOP_THREADS=6
+Environment=TF_NUM_INTEROP_THREADS=2
+Environment=OMP_NUM_THREADS=6
+Nice=19
+CPUWeight=20
+CPUQuota=800%
 # `uv run` resolves/creates .venv from pyproject.toml + uv.lock on its own
 # (no separate `uv sync` provisioning step needed), and is idempotent -- an
 # already-satisfied lock is a fast no-op before ExecStart's real work runs.
-ExecStart=/usr/local/bin/uv run --project /srv/frontfinder-app python -m frontfinder.scheduler.cli \
+#
+# 2026-09-18 (two-3090 GPU passthrough): ExecStart wraps the real command in
+# a shell so LD_LIBRARY_PATH can be computed at start time rather than
+# hardcoded. `tensorflow[and-cuda]`'s pip-installed nvidia-*-cu12 wheels
+# (cudart/cudnn/cublas/etc, under .venv/.../site-packages/nvidia/<component>/lib)
+# are NOT found by TensorFlow's own RPATH lookup in this environment --
+# confirmed live: `tf.config.list_physical_devices("GPU")` came back empty
+# and TF logged "Cannot dlopen some GPU libraries" even with a working
+# driver (nvidia-smi) and the wheels genuinely present on disk, but adding
+# their lib/ dirs to LD_LIBRARY_PATH fixed it immediately (both GPUs
+# detected). Discovered via `find ... -name lib` rather than hardcoding
+# each CUDA component's directory name, so this doesn't silently go stale
+# if `tensorflow[and-cuda]`'s exact set of nvidia-*-cu12 dependencies
+# changes on a future version bump -- an empty match (e.g. a revert to
+# plain "tensorflow"/"tensorflow-cpu") just leaves LD_LIBRARY_PATH empty,
+# same as before this existed.
+ExecStart=/bin/sh -c '\
+    export LD_LIBRARY_PATH="$(find /srv/frontfinder-app/.venv/lib/python3.11/site-packages/nvidia -mindepth 2 -maxdepth 2 -type d -name lib 2>/dev/null | paste -sd: -)"; \
+    exec /usr/local/bin/uv run --project /srv/frontfinder-app python -m frontfinder.scheduler.cli \
     --model-dir /srv/frontfinder-app/models \
     --output-root /srv/frontfinder-app/output \
     --cache-dir /srv/frontfinder-app/ifs_cache \
     --retention-days 10 \
-    --poll
+    --poll'
 
 # A single stuck ecmwf-opendata download or a slow CPU inference pass should
 # not hang forever and block the next timer firing. Also caps how long a

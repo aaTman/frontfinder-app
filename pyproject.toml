@@ -15,8 +15,20 @@ dependencies = [
     "xproj>=0.1",
     "topozarr==0.0.4",  # pinned: pre-1.0, "APIs may change without notice" per its own docs
 
-    # Inference (CPU build only -- no GPU on mandelhub)
-    "tensorflow-cpu>=2.16",
+    # Inference: full (GPU-capable) build -- mandelhub/CT108 got 2x RTX 3090
+    # passed through 2026-09-18. Plain "tensorflow" alone does NOT pull in
+    # the CUDA runtime -- confirmed live: with just "tensorflow>=2.16",
+    # `tf.config.list_physical_devices("GPU")` came back empty and
+    # cudart_stub.cc logged "Could not find cuda drivers," even with
+    # nvidia-smi working and the driver correctly passed through, because no
+    # nvidia-*-cu12 wheels (cuDNN/cuBLAS/cudart/etc) were installed at all.
+    # The `[and-cuda]` extra is what actually declares those as
+    # dependencies. Still runs fine CPU-only if no GPU/driver is present
+    # (falls back automatically, just carries the extra ~2GB of CUDA wheels
+    # either way) -- frontfinder/inference/engine.py's `device=None` default
+    # (see KerasPredictor) is what actually keeps today's placement
+    # behavior unchanged regardless of which build is installed.
+    "tensorflow[and-cuda]>=2.16",
     "keras>=3.0",
 
     # IFS ingestion (network-dependent; not exercised by the unit test suite)
