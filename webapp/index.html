@@ -739,6 +739,12 @@
       // the browser console. Costs a bit of extra GPU memory/bandwidth for
       // the preserved buffer; negligible at this map's scale.
       preserveDrawingBuffer: true,
+      // Keep the view (lat/lon/zoom) in the URL hash, same as
+      // spreadanomaly.espr.ai. Both sites read the hash on load, so a nav
+      // flip between them (spreadanomaly copies its live hash onto the
+      // Fronts link) reopens the map at the identical view, and browser
+      // back restores the view you left.
+      hash: true,
     });
     // Debugging aid: `map` is a module-scope binding, so it isn't reachable
     // from the DevTools console (which evaluates in global/window scope)
