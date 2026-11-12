@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Runs on the self-hosted mandelhub runner, which holds deploy credentials:
+    # never run code from fork PRs there.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, mandelhub]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv sync --frozen --group dev
+      - run: uv run pytest -q
