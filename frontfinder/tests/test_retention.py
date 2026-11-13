@@ -169,3 +169,37 @@ def test_prune_old_cache_files_handles_step_suffixed_naming(tmp_path):
 
     assert deleted == [old]
     assert os.path.exists(new)
+
+
+def test_prune_old_output_stores_also_prunes_fronts_geojson_by_the_same_cutoff(tmp_path):
+    root = str(tmp_path)
+    model_dir = os.path.join(root, "m")
+    old_store = _touch_store(root, "m", "2026-08-01T00Z_f006.zarr")
+    new_store = _touch_store(root, "m", "2026-08-20T18Z_f006.zarr")
+    files = {}
+    for name in ("2026-08-01T00Z_f006.fronts.geojson", "2026-08-20T18Z_f006.fronts.geojson", "notes.fronts.geojson"):
+        files[name] = os.path.join(model_dir, name)
+        with open(files[name], "w") as f:
+            f.write("{}")
+    pointer = _write_latest_pointer(root, "m")
+
+    deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
+
+    assert sorted(deleted) == sorted([old_store, files["2026-08-01T00Z_f006.fronts.geojson"]])
+    assert os.path.exists(files["2026-08-20T18Z_f006.fronts.geojson"])
+    assert os.path.exists(files["notes.fronts.geojson"])  # unrecognized name -> left alone
+    assert os.path.exists(new_store) and os.path.exists(pointer)
+
+
+def test_prune_old_output_stores_also_prunes_orientation_field_sidecars(tmp_path):
+    root = str(tmp_path)
+    model_dir = os.path.join(root, "m")
+    os.makedirs(model_dir)
+    names = {"2026-08-01T00Z_f006.fields.npz": True, "2026-08-20T18Z_f006.fields.npz": False, "other.fields.npz": False}
+    for name in names:
+        with open(os.path.join(model_dir, name), "w") as f:
+            f.write("x")
+    deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
+    assert deleted == [os.path.join(model_dir, "2026-08-01T00Z_f006.fields.npz")]
+    for name, pruned in names.items():
+        assert os.path.exists(os.path.join(model_dir, name)) == (not pruned)

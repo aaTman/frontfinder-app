@@ -15,6 +15,11 @@ dependencies = [
     "xproj>=0.1",
     "topozarr==0.0.4",  # pinned: pre-1.0, "APIs may change without notice" per its own docs
 
+    # Optional "Front lines" overlay for the webapp (frontfinder/postprocess/):
+    # skeletonize + spline fitting over each step's probability grids.
+    "scipy>=1.13",
+    "scikit-image>=0.22",
+
     # Inference: full (GPU-capable) build -- mandelhub/CT108 got 2x RTX 3090
     # passed through 2026-09-18. Plain "tensorflow" alone does NOT pull in
     # the CUDA runtime -- confirmed live: with just "tensorflow>=2.16",
