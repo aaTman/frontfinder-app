@@ -102,6 +102,7 @@ def run_one_model(
     source: IFSFieldSource,
     cycle: IFSCycle,
     output_root: str,
+    save_orientation_fields: bool = False,
 ) -> str:
     """Runs one model end-to-end for one (cycle, step). Returns the zarr
     store path written. Does NOT write latest.json -- that's `run_cycle`'s
@@ -111,6 +112,17 @@ def run_one_model(
     manifest = run_config.manifest
     logger.info("assembling input for model=%s cycle=%s", manifest.name, cycle)
     input_grid = assemble_model_input(manifest, source, cycle)
+    orientation_fields = None
+    if save_orientation_fields:
+        # Copied now, before inference gets a chance to reuse the grid. Best
+        # effort: the 850 hPa fields only decide which side the viewer's
+        # front symbols go on (see postprocess/front_lines.py).
+        try:
+            from frontfinder.postprocess.front_lines import extract_orientation_fields
+
+            orientation_fields = extract_orientation_fields(manifest, input_grid, source.lat, source.lon)
+        except Exception:
+            logger.exception("could not extract orientation fields for model=%s -- continuing without", manifest.name)
 
     logger.info("running tiled inference for model=%s", manifest.name)
     served_probs = run_tiled_inference(
@@ -143,6 +155,13 @@ def run_one_model(
     os.makedirs(os.path.dirname(store_path), exist_ok=True)
     write_front_pyramid(pyramid, store_path)
     logger.info("wrote %s", store_path)
+    if orientation_fields is not None:
+        try:
+            from frontfinder.postprocess.front_lines import fields_filename, save_orientation_fields as save_fields
+
+            save_fields(orientation_fields, os.path.join(os.path.dirname(store_path), fields_filename(store_name)))
+        except Exception:
+            logger.exception("could not save orientation fields for %s -- continuing without", store_path)
     return store_path
 
 
@@ -154,7 +173,11 @@ def _store_name(cycle: IFSCycle) -> str:
 
 
 def _write_latest_pointer(
-    output_root: str, model_name: str, cycle: IFSCycle, step_entries: list[dict]
+    output_root: str,
+    model_name: str,
+    cycle: IFSCycle,
+    step_entries: list[dict],
+    expected_steps: tuple[int, ...] | None = None,
 ) -> None:
     """Writes `<output_root>/<model>/latest.json`, read by the webapp to find
     every step successfully published for the most recent cycle, without
@@ -170,12 +193,20 @@ def _write_latest_pointer(
             {"step_hours": 0, "valid_time": "2026-08-20T18:00:00", "store": "..."},
             {"step_hours": 6, "valid_time": "2026-08-21T00:00:00", "store": "..."},
             ...
-          ]
+          ],
+          "expected_steps": [0, 6, 12, ...]
         }
+
+    `expected_steps` (lead hours this cycle is targeting, published or not)
+    lets the webapp's slider draw a tick for every expected step and mark
+    the ones that haven't landed yet. Omitted when the caller doesn't know.
     """
     pointer_path = os.path.join(output_root, model_name, "latest.json")
     with open(pointer_path, "w") as f:
-        json.dump({"cycle_time": _cycle_time(cycle), "steps": step_entries}, f)
+        pointer = {"cycle_time": _cycle_time(cycle), "steps": step_entries}
+        if expected_steps is not None:
+            pointer["expected_steps"] = list(expected_steps)
+        json.dump(pointer, f)
 
 
 def run_cycle(
@@ -185,6 +216,8 @@ def run_cycle(
     run_hour: int,
     output_root: str,
     steps: tuple[int, ...] | None = None,
+    front_lines: bool = False,
+    front_line_threshold: float | None = None,
 ) -> dict[str, list[str]]:
     """Runs every configured model across every step this cycle publishes
     (default: `target_steps_for_cycle(run_hour)`, i.e. every 6h out to 240h
@@ -268,9 +301,28 @@ def run_cycle(
     called from the main thread, after a step's results are all in (each
     model writes its own, differently-named file, so there's no
     cross-model collision to guard against either way).
+
+    `front_lines` (off by default here; the CLI turns it on) additionally
+    derives smooth front lines from each published step's probabilities
+    (`postprocess.front_lines`) and lists the per-step GeoJSON file as a
+    `"fronts"` key on that step's `latest.json` entry, for the webapp's
+    optional "Front lines" overlay. It never changes the zarr stores, and
+    any failure there is logged and swallowed -- inference and publishing
+    carry on exactly as without it. `front_line_threshold` overrides the
+    summed-probability threshold for a front's crest (the splines default
+    otherwise).
     """
     if steps is None:
         steps = target_steps_for_cycle(run_hour)
+    front_line_config = None
+    if front_lines:
+        try:
+            from frontfinder.postprocess.front_lines import default_config
+
+            front_line_config = default_config(front_line_threshold)
+        except Exception:
+            logger.exception("front lines unavailable (could not import the splines module) -- continuing without them")
+            front_lines = False
 
     store_paths: dict[str, list[str]] = {rc.manifest.name: [] for rc in run_configs}
     step_entries: dict[str, list[dict]] = {rc.manifest.name: [] for rc in run_configs}
@@ -296,7 +348,8 @@ def run_cycle(
             logger.info("model %s step %s already written for cycle %s -- skipping re-run", manifest_name, step, cycle)
             return manifest_name, existing_store_path
         try:
-            return manifest_name, run_one_model(run_config, source, cycle, output_root)
+            extra = {"save_orientation_fields": True} if front_lines else {}
+            return manifest_name, run_one_model(run_config, source, cycle, output_root, **extra)
         except Exception:
             logger.exception("model %s failed for cycle %s -- skipping this step", manifest_name, cycle)
             return manifest_name, None
@@ -316,9 +369,19 @@ def run_cycle(
             step_entries[manifest_name].append(
                 {"step_hours": step, "valid_time": _valid_time(cycle), "store": _store_name(cycle)}
             )
+            if front_lines:
+                from frontfinder.postprocess.front_lines import attach_front_lines
+
+                # Re-derives every published step so far (tracking needs the
+                # whole sequence, in order; ~0.4 s/step) and never raises.
+                attach_front_lines(
+                    os.path.join(output_root, manifest_name), step_entries[manifest_name], front_line_config
+                )
             # Publish as soon as this step lands, not after the whole cycle
             # -- see the postmortem above.
-            _write_latest_pointer(output_root, manifest_name, cycle, step_entries[manifest_name])
+            _write_latest_pointer(
+                output_root, manifest_name, cycle, step_entries[manifest_name], expected_steps=tuple(steps)
+            )
 
     results: dict[str, list[str]] = {}
     for run_config in run_configs:

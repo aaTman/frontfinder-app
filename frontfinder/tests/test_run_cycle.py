@@ -163,6 +163,7 @@ def test_run_cycle_writes_one_consolidated_latest_pointer_listing_every_successf
     pointer = json.loads(pointer_path.read_text())
     assert pointer["cycle_time"] == "2026-08-19T12:00:00"
     assert [s["step_hours"] for s in pointer["steps"]] == [0, 6, 12]
+    assert pointer["expected_steps"] == [0, 6, 12]
     assert pointer["steps"][0]["valid_time"] == "2026-08-19T12:00:00"
     assert pointer["steps"][1]["valid_time"] == "2026-08-19T18:00:00"
     assert pointer["steps"][2]["valid_time"] == "2026-08-20T00:00:00"
@@ -350,3 +351,92 @@ def test_run_cycle_defaults_to_target_steps_for_cycle_when_steps_omitted(tiny_so
 
     results = run_cycle(configs, tiny_source, "2026-08-19", 18, str(tmp_path))
     assert len(results["model_1702"]) == 25
+
+
+def _model_1702_config():
+    return [
+        ModelRunConfig(manifest=MODEL_1702_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2),
+    ]
+
+
+def test_run_cycle_leaves_front_lines_out_unless_asked(tiny_source, tmp_path):
+    run_cycle(_model_1702_config(), tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0, 6))
+    pointer = json.loads((tmp_path / "model_1702" / "latest.json").read_text())
+    assert all("fronts" not in s for s in pointer["steps"])
+    assert not list((tmp_path / "model_1702").glob("*.fronts.geojson"))
+
+
+def test_run_cycle_with_front_lines_lists_a_geojson_per_step_in_latest_json(tiny_source, tmp_path):
+    run_cycle(_model_1702_config(), tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0, 6, 12), front_lines=True)
+    model_dir = tmp_path / "model_1702"
+    pointer = json.loads((model_dir / "latest.json").read_text())
+    assert [s["fronts"] for s in pointer["steps"]] == [
+        "2026-08-19T12Z_f000.fronts.geojson",
+        "2026-08-19T12Z_f006.fronts.geojson",
+        "2026-08-19T12Z_f012.fronts.geojson",
+    ]
+    collection = json.loads((model_dir / pointer["steps"][1]["fronts"]).read_text())
+    assert collection["type"] == "FeatureCollection"
+    assert collection["valid_time"] == "2026-08-19T18:00:00"
+
+
+def test_a_crash_in_front_lines_never_stops_publishing(tiny_source, tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("splines exploded")
+
+    monkeypatch.setattr("frontfinder.postprocess.front_lines.write_front_lines", boom)
+    results = run_cycle(_model_1702_config(), tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0, 6), front_lines=True)
+    assert len(results["model_1702"]) == 2
+    pointer = json.loads((tmp_path / "model_1702" / "latest.json").read_text())
+    assert [s["step_hours"] for s in pointer["steps"]] == [0, 6]
+    assert all("fronts" not in s for s in pointer["steps"])
+
+
+def test_run_cycle_with_front_lines_saves_orientation_fields_next_to_each_store(tiny_source, tmp_path):
+    from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_MANIFEST as NBS
+
+    class NbsPredictor:
+        def predict_batch(self, patches):
+            n, h, w, _ = patches.shape
+            out = np.random.default_rng(1).random((n, h, w, len(NBS.all_classes))).astype(np.float32)
+            return out / out.sum(axis=-1, keepdims=True)
+
+    configs = [ModelRunConfig(manifest=NBS, predictor=NbsPredictor(), patch_size=64, overlap=16, n_pyramid_levels=2)]
+    run_cycle(configs, tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0, 6), front_lines=True)
+    model_dir = tmp_path / NBS.name
+    assert sorted(p.name for p in model_dir.glob("*.fields.npz")) == [
+        "2026-08-19T12Z_f000.fields.npz",
+        "2026-08-19T12Z_f006.fields.npz",
+    ]
+    with np.load(model_dir / "2026-08-19T12Z_f000.fields.npz") as z:
+        assert set(z.files) == {"temperature", "u", "v", "lat", "lon"}
+        assert z["temperature"].shape == (len(z["lat"]), len(z["lon"]))
+
+
+def test_run_cycle_without_front_lines_writes_no_orientation_fields(tiny_source, tmp_path):
+    run_cycle(_model_1702_config(), tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0,))
+    assert not list((tmp_path / "model_1702").glob("*.fields.npz"))
+
+
+def test_rebuild_orientation_fields_fills_in_a_cycle_published_without_them(tiny_source, tmp_path):
+    from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_MANIFEST as NBS
+    from frontfinder.postprocess import front_lines
+
+    class NbsPredictor:
+        def predict_batch(self, patches):
+            n, h, w, _ = patches.shape
+            out = np.random.default_rng(1).random((n, h, w, len(NBS.all_classes))).astype(np.float32)
+            return out / out.sum(axis=-1, keepdims=True)
+
+    configs = [ModelRunConfig(manifest=NBS, predictor=NbsPredictor(), patch_size=64, overlap=16, n_pyramid_levels=2)]
+    run_cycle(configs, tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0, 6))  # front_lines off: no sidecars
+    model_dir = tmp_path / NBS.name
+    assert not list(model_dir.glob("*.fields.npz"))
+
+    assert front_lines.rebuild_orientation_fields(str(tmp_path), NBS.name, tiny_source) == 2
+    assert sorted(p.name for p in model_dir.glob("*.fields.npz")) == [
+        "2026-08-19T12Z_f000.fields.npz",
+        "2026-08-19T12Z_f006.fields.npz",
+    ]
+    assert front_lines.rebuild_orientation_fields(str(tmp_path), NBS.name, tiny_source) == 0  # nothing left to do
+    assert front_lines.rebuild_orientation_fields(str(tmp_path), "not_a_model", tiny_source) == 0
