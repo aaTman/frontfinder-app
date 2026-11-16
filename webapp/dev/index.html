@@ -1,0 +1,2818 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Embedded mode: when framed (e.g. by the espr.ai dashboard tab bar) or opened
+       with ?embed=1, hide this page's own site nav so the host's chrome isn't doubled. -->
+  <script>
+    (function () {
+      try {
+        var q = new URLSearchParams(location.search).get('embed');
+        if (window.self !== window.top || q === '1') document.documentElement.classList.add('embedded');
+      } catch (e) { document.documentElement.classList.add('embedded'); }
+    })();
+  </script>
+  <style>
+    html.embedded .site-nav { display: none !important; }
+    html.embedded { --nav-height: 0px !important; }
+  </style>
+  <title>Fronts (dev) — ESPR</title>
+  <!-- Staging build of the viewer (see webapp/README.md, "/dev"): not for indexing. -->
+  <meta name="robots" content="noindex" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <!-- v5, not v4: globe projection (map.setProjection below) doesn't exist
+       in maplibre-gl@4 at all -- confirmed against the real v4.7.1
+       dist/maplibre-gl.d.ts (no `setProjection`/`ProjectionSpecification`)
+       vs v5.24.0's, which has both. Bumped 2026-08-21 alongside adding the
+       globe view. -->
+  <!-- 2026-11-16 (startup-latency pass): open the connections this page's
+       resources need before any script runs. crossorigin: every one of these
+       origins is fetched in CORS mode (esm.sh/unpkg modules, maplibre's
+       fetch()-based style/tile/glyph requests), and a plain preconnect would
+       warm the wrong (non-CORS) connection pool. -->
+  <link rel="preconnect" href="https://esm.sh" crossorigin />
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
+  <!-- Same pass: modulepreload the ENTIRE esm.sh import graph up front. The
+       importmap only pins the two top-level entries; esm.sh serves those as
+       one-line shims that re-export deeper paths, so the real graph is a
+       3-level waterfall -- entry shim -> zarr-layer.mjs / maplibre-gl.mjs ->
+       zarrita/proj4/delaunator/raster-reproject shims -> their leaf .mjs
+       files -- where each level only starts downloading once the previous
+       one has. The numcodecs zstd decoder (its 302 KB zstd.mjs) used to sit
+       even further down: it was only fetched AFTER the first chunk response
+       arrived, serially blocking first paint of the data. Every URL below is
+       copied from the module sources esm.sh actually serves (fetched and
+       checked 2026-11-16) -- note the literal ^ in the ^-range shims and the
+       ?target=es2022 query esm.sh appends for this browser, both of which
+       must match the later import exactly or the preload is wasted. Resolved
+       ranges means an esm.sh re-resolution (e.g. zarrita 0.7.7) would strand
+       stale preloads as unused small fetches until this list is refreshed;
+       the pinned importmap entries below stay authoritative. -->
+  <link rel="modulepreload" href="https://esm.sh/maplibre-gl@5.24.1" />
+  <link rel="modulepreload" href="https://esm.sh/maplibre-gl@5.24.1/es2022/maplibre-gl.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@carbonplan/zarr-layer@0.12.1" />
+  <link rel="modulepreload" href="https://esm.sh/@carbonplan/zarr-layer@0.12.1/es2022/zarr-layer.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@developmentseed/raster-reproject@^0.8.1?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/@developmentseed/raster-reproject@0.8.1/es2022/raster-reproject.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/delaunator@^5.1.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/delaunator@5.1.0/es2022/delaunator.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/robust-predicates@^3.0.2?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/robust-predicates@3.0.3/es2022/robust-predicates.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/proj4@^2.22.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/proj4@2.23.0/es2022/proj4.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/mgrs@1.0.0/es2022/mgrs.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/wkt-parser@^1.9.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/wkt-parser@1.9.0/es2022/wkt-parser.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/zarrita@^0.7.5?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/zarrita@0.7.6/es2022/zarrita.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@^0.2.1/fetch?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@0.2.1/es2022/dist/src/util.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@0.2.1/es2022/fetch.mjs" />
+  <!-- The zstd codec numcodecs dynamically imports once the first chunk
+       arrives -- preloading it here takes it off that serial path. -->
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@^0.3.2/zstd?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@0.3.2/es2022/dist/chunk-INHXZS53.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@0.3.2/es2022/zstd.mjs" />
+  <!-- Pinned to the exact version esm.sh's @5 range resolves to anyway
+       (5.24.1, confirmed 2026-11-16): unpkg's @5 alias 302-redirects per
+       request, costing a round trip at the front of the waterfall. Keep in
+       sync with the importmap below. -->
+  <link href="https://unpkg.com/maplibre-gl@5.24.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script>
+    // 2026-11-16 (startup-latency pass): this classic inline script runs at
+    // HTML-parse time, while the esm.sh module graph (script type="module",
+    // below) is still downloading and the basemap style hasn't even been
+    // requested. Kicking latest.json off here -- and the first step's root
+    // zarr.json as soon as it parses -- moves the whole data pipeline's
+    // network leg ahead of the map instead of behind it (it used to start
+    // only on the map's "load" event, i.e. after ~2 MB of glyphs/tiles).
+    // Nothing is parsed here; the module's resolveLatestRun() consumes the
+    // stored promise. latest.json itself is deliberately no-store (it's a
+    // moving pointer, see resolveLatestRun); the step's zarr.json is safe to
+    // warm because every zarr store path is served immutable (Caddy
+    // Cache-Control, see the clearAllCachedLayers comment) -- the zarr-layer
+    // metadata fetch later hits the browser HTTP cache with no extra
+    // network request.
+    //
+    // Keep these two literals in sync with MODELS.latestPointer below --
+    // they can't be derived from it because this script runs before the
+    // module graph is loaded.
+    //
+    // /dev only: `?data=dev` reads the uint8-packed stores from /data-dev
+    // (see deploy/Caddyfile); anything else reads the production /data tree
+    // (float32 today), so the startup-latency work can be judged on live
+    // data and the uint8 data savings opted into separately.
+    const DEV_DATA = new URLSearchParams(location.search).get("data") === "dev";
+    window.__ZARR_ROOT = DEV_DATA ? "/data-dev" : "/data";
+    const LATEST_MODEL = "nbs_square_dilation_trof_tt_no_inst";
+    const LATEST_POINTER = `${window.__ZARR_ROOT}/${LATEST_MODEL}/latest.json`;
+    const warm = fetch(LATEST_POINTER, { cache: "no-store" }).then((res) => {
+      if (!res.ok) throw new Error(`no published run for ${LATEST_MODEL} (HTTP ${res.status})`);
+      return res.json();
+    });
+    window.__latestRunPromise = { model: LATEST_MODEL, promise: warm };
+    warm.catch(() => {}); // no unhandled-rejection noise if resolveLatestRun never consumes it
+    warm.then((latest) => {
+      const step = latest?.steps?.[0];
+      if (step?.store) fetch(`${window.__ZARR_ROOT}/${LATEST_MODEL}/${step.store}/zarr.json`, { priority: "high" }).catch(() => {});
+    });
+  </script>
+  <style>
+    /* 2026-08-24: top nav bar mimicking espr.ai's own site-nav, added per
+       Taylor's request. Colors/fonts/breakpoint pulled directly from
+       espr.ai's shipped BaseLayout.css (--black/--text/--muted/--hairline/
+       --rose, "Helvetica Neue" stack, 760px collapse) rather than
+       approximated, so this page reads as the same site as the parent
+       espr.ai. Unlike espr.ai's own hero pages (.site-nav with no .solid,
+       position:absolute over a transparent hero), this page has no hero to
+       overlay -- the map fills the whole viewport underneath the panel/
+       legend cards -- so the bar here is always the ".solid"-equivalent:
+       a real fixed-height bar with a solid background and a bottom
+       hairline, and #map/#panel are pushed down by --nav-height so nothing
+       sits underneath it. */
+    :root {
+      --nav-height: 110px; /* overwritten by JS once the real (clamp-based) nav height is known -- see the measurement script below */
+      --black: #07070c; --nav-text: #edeae6; --nav-muted: #8e8d98;
+      --hairline: #232331; --rose: #e9afc0;
+      --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    }
+    /* Was #0b0e14 -- a different, mismatched dark shade from espr.ai's own
+       --black (#07070c). The nav has no background color of its own on
+       espr.ai (see .site-nav below) -- it just shows the body's color
+       through, so body has to actually BE that color for the nav to look
+       like it "inherits" the page background instead of sitting on top of
+       a visibly different-toned slab. */
+    html, body, #map { height: 100%; margin: 0; background: var(--black); }
+    #map { position: absolute; top: var(--nav-height); left: 0; right: 0; bottom: 0; height: auto; }
+    /* See unstickNarrowViewportDataLoad() in the module script -- hides the
+       brief forced-wide-then-back resize used to work around a
+       @carbonplan/zarr-layer bug on narrow (phone-width) viewports. */
+    #map.resize-workaround { opacity: 0; transition: opacity 0.25s; }
+    .site-nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+      font-family: var(--font-sans);
+    }
+    /* box-sizing: espr.ai's global.css sets `* { box-sizing: border-box }`
+       site-wide, which this page never did. Without it, .nav-inner's
+       padding was being ADDED on top of min-height instead of included in
+       it (content-box default), inflating the bar to ~179px instead of the
+       real ~110px -- that was the actual "wrong shape/aspect ratio" bug,
+       not the padding/font values themselves (those already matched). */
+    .site-nav, .site-nav * { box-sizing: border-box; }
+    /* Sizing (padding, gaps, font sizes) copied verbatim from espr.ai's
+       .nav-inner/.home/.nav-links rules in BaseLayout.css. min-height
+       mirrors espr.ai's own `calc(42px + 2*clamp(24px,3.2vw,34px))` (42px
+       ~= this button-row's intrinsic height), so the bar's proportions
+       track viewport width the same way theirs do; JS below reads the
+       rendered height into --nav-height since clamp() can't be replicated
+       as a static var. */
+    /* espr.ai's nav content sits inside its shared .wrap (max-width:1100px,
+       centered) with a nav-specific horizontal padding override -- this
+       page skipped .wrap entirely and put full-viewport-width padding
+       directly on .nav-inner, so on anything wider than 1100px the links
+       ran all the way out to the screen edges instead of stopping in a
+       centered column like the rest of the site.
+       .wrap and .nav-inner apply to the SAME element here (real markup is
+       `<div class="wrap nav-inner">`), and both declare `padding` --
+       .nav-inner's `padding: <v> 0` must come first so .wrap's rule, later
+       in source order at equal specificity, is the one that wins for
+       left/right (espr.ai's own stylesheet relies on this same ordering,
+       just split across longhand padding-left/right instead of shorthand). */
+    .site-nav .nav-inner {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: clamp(12px, 3vw, 24px);
+      min-height: calc(42px + 2 * clamp(24px, 3.2vw, 34px));
+      padding: clamp(24px, 3.2vw, 34px) 0;
+    }
+    .site-nav .wrap {
+      max-width: 1100px; margin: 0 auto;
+      padding-left: clamp(18px, 4vw, 40px);
+      padding-right: clamp(18px, 4vw, 40px);
+    }
+    .site-nav .home {
+      color: var(--nav-text); white-space: nowrap; font-size: clamp(13px, 1.4vw, 14px);
+      text-decoration: none;
+    }
+    .site-nav .home:hover { color: var(--rose); }
+    .site-nav .nav-toggle {
+      display: none; border: 1px solid var(--hairline); width: 42px; height: 42px;
+      color: var(--nav-text); cursor: pointer; background: #07070cb8; border-radius: 999px;
+      flex-direction: column; justify-content: center; align-items: center; gap: 4px; padding: 0;
+    }
+    .site-nav .nav-toggle:hover { border-color: var(--rose); }
+    .site-nav .nav-toggle span { background: currentColor; width: 18px; height: 1.5px; display: block; }
+    .site-nav .nav-toggle[aria-expanded="true"] span:nth-child(1) { transform: translateY(5.5px) rotate(45deg); }
+    .site-nav .nav-toggle[aria-expanded="true"] span:nth-child(2) { opacity: 0; }
+    .site-nav .nav-toggle[aria-expanded="true"] span:nth-child(3) { transform: translateY(-5.5px) rotate(-45deg); }
+    .site-nav .nav-links { flex-wrap: nowrap; align-items: center; gap: clamp(12px, 3vw, 32px); display: flex; }
+    .site-nav .nav-links a {
+      color: var(--nav-muted); white-space: nowrap; font-size: clamp(13px, 1.4vw, 14px); text-decoration: none;
+    }
+    .site-nav .nav-links a:hover, .site-nav .nav-links a[aria-current="page"] { color: var(--nav-text); }
+    .site-nav .nav-dropdown { position: relative; }
+    .site-nav .nav-dropdown-toggle {
+      font: inherit; font-size: clamp(13px, 1.4vw, 14px); line-height: inherit; color: var(--nav-muted); cursor: pointer;
+      background: none; border: none; margin: 0; padding: 0;
+    }
+    .site-nav .nav-dropdown-toggle:hover,
+    .site-nav .nav-dropdown-toggle[aria-current="page"],
+    .site-nav .nav-dropdown-toggle[aria-expanded="true"] { color: var(--nav-text); }
+    .site-nav .nav-dropdown-menu {
+      border: 1px solid var(--hairline); opacity: 0; pointer-events: none;
+      background: #07070cf5; border-radius: 12px; flex-direction: column; gap: 8px;
+      min-width: 130px; padding: 12px; transition: opacity .15s, transform .15s;
+      display: flex; position: absolute; top: calc(100% + 10px); left: 0;
+      transform: translateY(-6px) scale(.98); box-shadow: 0 20px 50px #00000059;
+    }
+    .site-nav .nav-dropdown.is-open .nav-dropdown-menu {
+      opacity: 1; pointer-events: auto; transform: translateY(0) scale(1);
+    }
+    @media (width <= 760px) {
+      .site-nav .nav-toggle { display: inline-flex; }
+      .site-nav .nav-links {
+        border: 1px solid var(--hairline); opacity: 0; pointer-events: none;
+        background: #07070cf5; border-radius: 12px; flex-direction: column; gap: 10px;
+        min-width: 140px; padding: 14px; transition: opacity .15s, transform .15s;
+        display: flex; position: absolute; top: calc(100% + 8px); right: 14px;
+        transform: translateY(-6px) scale(.98); box-shadow: 0 20px 50px #00000059;
+      }
+      .site-nav .nav-links.is-open { opacity: 1; pointer-events: auto; transform: translateY(0) scale(1); }
+      .site-nav .nav-links a { padding: 2px 0; }
+    }
+    #panel {
+      position: absolute; top: calc(var(--nav-height) + 12px); left: 12px; z-index: 10;
+      background: rgba(15, 18, 26, 0.88); color: #e6e8ee;
+      font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border-radius: 10px; padding: 12px 14px; min-width: 240px;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.35);
+    }
+    #panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; }
+    #panel h1 { font-size: 14px; margin: 0; font-weight: 600; }
+    #info-button {
+      flex: none; width: 18px; height: 18px; border-radius: 50%; padding: 0;
+      border: 1px solid #3a3f4d; background: #1c2130; color: #c8cbd6;
+      cursor: pointer; font-size: 11px; font-weight: 700; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      font-family: Georgia, "Times New Roman", serif;
+    }
+    #info-button:hover { background: #2a3040; }
+    #panel-actions { display: flex; align-items: center; gap: 6px; }
+    #panel-collapse {
+      flex: none; width: 18px; height: 18px; border-radius: 50%; padding: 0;
+      border: 1px solid #3a3f4d; background: #1c2130; color: #c8cbd6;
+      cursor: pointer; font-size: 13px; font-weight: 700; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #panel-collapse:hover { background: #2a3040; }
+    /* Minimized: keep the header and time controls, drop the checkbox lists. */
+    #panel.is-collapsed #model-toggles-label,
+    #panel.is-collapsed #model-toggles,
+    #panel.is-collapsed #class-toggles-label,
+    #panel.is-collapsed #class-toggles,
+    #panel.is-collapsed #overlay-toggles-label,
+    #panel.is-collapsed #overlay-toggles,
+    #panel.is-collapsed #meta { display: none; }
+
+    /* 2026-08-24: info modal, added per Taylor's request -- paper link +
+       serving/model description. Plain centered overlay dialog rather than
+       another corner card since the content is long-form prose, not a
+       glanceable readout like #legend. */
+    #info-overlay {
+      /* top: var(--nav-height) keeps the modal below the fixed site nav (z-index 40) instead of sliding under it */
+      position: fixed; inset: var(--nav-height) 0 0 0; z-index: 30; display: none;
+      background: rgba(6, 8, 12, 0.6);
+      align-items: center; justify-content: center;
+    }
+    #info-overlay.open { display: flex; }
+    #info-modal {
+      background: #12151f; color: #e6e8ee;
+      font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border-radius: 12px; padding: 20px 22px; max-width: 480px; width: calc(100% - 48px);
+      max-height: calc(100% - 48px); overflow-y: auto;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    }
+    #info-modal h2 { font-size: 16px; margin: 0 0 4px; font-weight: 600; }
+    #info-modal h3 { font-size: 12px; margin: 16px 0 4px; font-weight: 600; color: #9aa0b4; text-transform: uppercase; letter-spacing: 0.03em; }
+    #info-modal p { margin: 4px 0; }
+    #info-modal a { color: #6ea3ff; }
+    #info-modal ul { margin: 4px 0; padding-left: 18px; }
+    #info-modal li { margin: 2px 0; }
+    #info-modal .cite { color: #8b90a0; font-size: 11px; }
+    #info-close {
+      position: absolute; top: 14px; right: 16px;
+      background: none; border: none; color: #8b90a0; font-size: 18px;
+      cursor: pointer; line-height: 1; padding: 2px 4px;
+    }
+    #info-close:hover { color: #e6e8ee; }
+    #info-modal { position: relative; }
+    .panel-subheading {
+      font-size: 10px; margin: 10px 0 3px; font-weight: 600; color: #9aa0b4;
+      text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    #model-toggles-label { margin-top: 0; }
+    .class-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    .class-row input[type="checkbox"] { accent-color: #3d6bff; }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    /* Optional overlays (currently just "Front lines"). The status text
+       only shows when the overlay is on but has nothing to draw. */
+    #front-lines-status { color: #8b90a0; font-size: 11px; }
+    #time-control {
+      margin-top: 10px; border-top: 1px solid #2a2f3d; padding-top: 10px;
+      display: none; /* shown once a run with >1 step is loaded */
+    }
+    #time-label { font-size: 12px; }
+    #time-init { color: #e6e8ee; }
+    #time-forecast { color: #8b90a0; margin-top: 2px; }
+    /* 2026-08-23: play/pause button + slider row, per Taylor's reference
+       (https://madewithmaplibre.com/products/yr-no/). Slider needs
+       min-width: 0 to actually shrink inside the flex row instead of
+       blowing out #panel's width -- range inputs don't respect flex-basis
+       like other elements without it. */
+    #time-scrubber { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+    #time-track { flex: 1; min-width: 0; }
+    #time-scrubber input[type="range"] { width: 100%; margin: 0; accent-color: #3d6bff; }
+    /* Tick per EXPECTED forecast step: light = published, red = not yet.
+       Positions inset by half a slider thumb (8px) so they line up with
+       where the native thumb actually travels. */
+    #time-ticks { position: relative; height: 12px; margin-top: 2px; }
+    .step-tick {
+      position: absolute; top: 0; width: 2px; height: 8px; margin-left: -1px;
+      border-radius: 1px; background: #e6e8ee; padding: 0; border: 0; cursor: pointer;
+    }
+    .step-tick.is-missing { background: #e5484d; height: 6px; top: 1px; cursor: default; }
+    .step-tick.is-current { background: #3d6bff; height: 12px; width: 3px; margin-left: -1.5px; }
+    /* Widen the hit area of clickable ticks without changing their look. */
+    .step-tick::after { content: ""; position: absolute; inset: -4px; }
+    #time-max-lead { flex: none; font-size: 11px; color: #8b90a0; }
+    #play-button {
+      flex: none; width: 26px; height: 26px; border-radius: 50%; padding: 0;
+      border: 1px solid #3a3f4d; background: #1c2130; color: #e6e8ee;
+      cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center;
+    }
+    #play-button:hover { background: #2a3040; }
+    #autoload-toggle {
+      display: flex; align-items: center; gap: 6px; margin-top: 8px;
+      font-size: 12px; color: #8b90a0; cursor: pointer; user-select: none;
+    }
+    #autoload-toggle input { accent-color: #3d6bff; margin: 0; cursor: pointer; }
+    #meta { margin-top: 10px; font-size: 11px; color: #8b90a0; border-top: 1px solid #2a2f3d; padding-top: 8px; }
+    #meta.error { color: #ff8080; }
+
+    /* 2026-08-21: bottom-right legend card + cursor hover tooltip, added
+       per Taylor's request (reference: a wildfire-probability map with a
+       bottom-right legend card showing swatches + range labels + a "Hide"
+       button). Adapted from that single-variable-colormap reference to our
+       4-class categorical scheme -- each class gets its own row, with the
+       row itself showing the 10 discrete opacity bands from
+       customClassFrag rather than one continuous gradient. */
+    #legend {
+      position: absolute; bottom: 40px; right: 12px; z-index: 10;
+      background: rgba(15, 18, 26, 0.88); color: #e6e8ee;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border-radius: 10px; padding: 10px 12px; min-width: 200px;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.35);
+    }
+    #legend-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; font-weight: 600; }
+    #legend-hide {
+      background: #1c2130; color: #c8cbd6; border: 1px solid #3a3f4d;
+      border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+    }
+    .legend-row { margin: 6px 0 14px; }
+    .legend-row:last-child { margin-bottom: 0; }
+    .legend-label { font-size: 11px; color: #c8cbd6; margin-bottom: 2px; }
+    .legend-bands { display: flex; height: 10px; border-radius: 3px; overflow: hidden; }
+    .legend-band { flex: 1; }
+    /* Colorbar tick row: a short vertical mark at every bin boundary, plus
+       a numeric label under every other one (all 11 labeled overlapped
+       into unreadable text at this card's width -- see the comment above
+       buildTicks() in the module script). Positions are absolute percents
+       lining up with the equal-width flex cells in .legend-bands above. */
+    .legend-ticks { position: relative; height: 14px; margin-top: 2px; }
+    .legend-tick-mark {
+      position: absolute; top: 0; width: 1px; height: 3px;
+      background: #4a4f5e;
+    }
+    .legend-tick-label {
+      position: absolute; top: 4px; transform: translateX(-50%);
+      font-size: 9px; color: #8b90a0; white-space: nowrap;
+    }
+    .legend-tick-label:first-of-type { transform: translateX(0); }
+    .legend-tick-label:last-of-type { transform: translateX(-100%); }
+
+    /* Click readout -- see updateClickTooltip() in the module script.
+       Queries the real decoded zarr values at the clicked point (via
+       ZarrLayer.queryData) rather than approximating from rendered pixel
+       color. Toggles: one click shows it, the next click (anywhere on
+       the map) dismisses it. */
+    #click-tooltip {
+      position: fixed; z-index: 20; pointer-events: none; display: none;
+      background: rgba(15, 18, 26, 0.92); color: #e6e8ee;
+      font: 12px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border-radius: 8px; padding: 6px 10px; box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <nav class="site-nav">
+    <div class="wrap nav-inner">
+      <a class="home" href="https://espr.ai/">Taylor Mandelbaum</a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav-menu" aria-label="Toggle navigation">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="nav-links" id="site-nav-menu">
+        <div class="nav-dropdown">
+          <button class="nav-dropdown-toggle" type="button" aria-expanded="false" aria-current="page">Projects</button>
+          <div class="nav-dropdown-menu">
+            <a href="https://fronts.espr.ai" aria-current="page">Fronts</a>
+          </div>
+        </div>
+        <a href="https://espr.ai/about/">About</a>
+        <a href="https://espr.ai/blog/">Writing</a>
+        <a href="https://espr.ai/resume/">Resume/CV</a>
+      </div>
+    </div>
+  </nav>
+  <script>
+    // Verbatim from espr.ai's own Nav.astro (aaTman/espr_website), so this
+    // page's nav behaves identically to the parent site's.
+    (function () {
+      const navs = document.querySelectorAll(".site-nav");
+
+      navs.forEach((nav) => {
+        const toggle = nav.querySelector(".nav-toggle");
+        const menu = nav.querySelector(".nav-links");
+
+        if (!toggle || !menu) return;
+
+        const closeMenu = () => {
+          toggle.setAttribute("aria-expanded", "false");
+          menu.classList.remove("is-open");
+        };
+
+        toggle.addEventListener("click", () => {
+          const isOpen = toggle.getAttribute("aria-expanded") === "true";
+
+          if (isOpen) {
+            closeMenu();
+          } else {
+            toggle.setAttribute("aria-expanded", "true");
+            menu.classList.add("is-open");
+          }
+        });
+
+        menu.querySelectorAll("a").forEach((link) => {
+          link.addEventListener("click", closeMenu);
+        });
+
+        document.addEventListener("click", (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          if (!nav.contains(target)) closeMenu();
+        });
+
+        window.addEventListener("resize", () => {
+          if (window.innerWidth > 760) closeMenu();
+        });
+
+        const dropdown = nav.querySelector(".nav-dropdown");
+        const dropdownToggle = nav.querySelector(".nav-dropdown-toggle");
+
+        if (dropdown && dropdownToggle) {
+          const closeDropdown = () => {
+            dropdownToggle.setAttribute("aria-expanded", "false");
+            dropdown.classList.remove("is-open");
+          };
+
+          dropdownToggle.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const isOpen = dropdownToggle.getAttribute("aria-expanded") === "true";
+
+            if (isOpen) {
+              closeDropdown();
+            } else {
+              dropdownToggle.setAttribute("aria-expanded", "true");
+              dropdown.classList.add("is-open");
+            }
+          });
+
+          document.addEventListener("click", (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            if (!dropdown.contains(target)) closeDropdown();
+          });
+        }
+      });
+
+      // Keeps --nav-height (used to offset #map/#panel below the bar) equal
+      // to the bar's real rendered height. Needed because .nav-inner's
+      // height comes from clamp()d padding, not a fixed value, so it can't
+      // be hardcoded as a static var -- it changes with viewport width.
+      const nav = document.querySelector(".site-nav");
+      if (nav) {
+        const syncNavHeight = () => {
+          document.documentElement.style.setProperty("--nav-height", `${nav.offsetHeight}px`);
+        };
+        new ResizeObserver(syncNavHeight).observe(nav);
+        syncNavHeight();
+      }
+    })();
+  </script>
+  <div id="map"></div>
+  <div id="panel">
+    <div id="panel-header">
+      <h1>Fronts</h1>
+      <div id="panel-actions">
+        <button id="panel-collapse" type="button" aria-label="Minimize front types" title="Minimize front types" aria-expanded="true">&minus;</button>
+        <button id="info-button" type="button" aria-label="About this model" title="About this model">i</button>
+      </div>
+    </div>
+    <div id="model-toggles-label" class="panel-subheading" hidden>Models</div>
+    <div id="model-toggles" hidden></div>
+    <div id="class-toggles-label" class="panel-subheading">Front &amp; trough types</div>
+    <div id="class-toggles"></div>
+    <div id="overlay-toggles-label" class="panel-subheading">Overlays</div>
+    <div id="overlay-toggles">
+      <label class="class-row" title="Smooth lines fitted to the probability bands, with standard front symbols: cold = triangles, warm = semicircles, occluded = both, stationary = alternating. Dashed: troughs and drylines.">
+        <input type="checkbox" id="front-lines-checkbox" />
+        Front lines <span id="front-lines-status"></span>
+      </label>
+    </div>
+    <div id="time-control">
+      <div id="time-label">
+        <div id="time-init">IFS Initialization --</div>
+        <div id="time-forecast">Forecast Hour <span id="time-lead">--</span> valid <span id="time-valid">--</span></div>
+      </div>
+      <div id="time-scrubber">
+        <button id="play-button" type="button" aria-label="Play">&#9654;</button>
+        <div id="time-track">
+          <input type="range" id="time-slider" min="0" max="0" value="0" step="1" />
+          <div id="time-ticks" aria-label="Forecast steps: light = published, red = not yet published"></div>
+        </div>
+        <span id="time-max-lead"></span>
+      </div>
+      <label id="autoload-toggle">
+        <input type="checkbox" id="autoload-checkbox" />
+        Auto-load timesteps
+      </label>
+    </div>
+    <div id="meta">loading…</div>
+  </div>
+
+  <div id="legend">
+    <div id="legend-header">
+      <span>Probability</span>
+      <button id="legend-hide" type="button">Hide</button>
+    </div>
+    <div id="legend-content">
+      <div id="legend-body"></div>
+    </div>
+  </div>
+  <div id="click-tooltip"></div>
+
+  <div id="info-overlay">
+    <div id="info-modal" role="dialog" aria-modal="true" aria-labelledby="info-title">
+      <button id="info-close" type="button" aria-label="Close">&times;</button>
+      <h2 id="info-title">About this model</h2>
+      <p>
+        Fronts and troughs are detected by a convolutional neural network,
+        specifically a UNet 3+
+        (<a href="https://doi.org/10.1109/ICASSP40776.2020.9053405" target="_blank" rel="noopener">Huang et al. 2020</a>),
+        trained to predict the probability of a cold, warm, stationary, or
+        occluded front, a dryline, a trough, or a tropical trough at each grid
+        point. The original method and evaluation are described in the paper
+        published in <em>Artificial Intelligence for the Earth Systems</em>:
+        <a href="https://doi.org/10.1175/AIES-D-24-0043.1" target="_blank" rel="noopener">
+          doi:10.1175/AIES-D-24-0043.1</a>.
+      </p>
+      <p>
+        The model served here was retrained after that paper was
+        published, with different input variables, different pressure
+        levels, additional trough classes, and a different loss function
+        than the ones described there. It was trained on data through 2024.
+      </p>
+
+      <h3>nbs_square_dilation_trof_tt_no_inst</h3>
+      <p>
+        Inputs: equivalent potential temperature (&theta;<sub>e</sub>),
+        u-wind, v-wind, and specific humidity, each on six pressure levels
+        (1000, 925, 850, 700, 500, and 300&nbsp;hPa), plus 10&nbsp;m u-wind,
+        10&nbsp;m v-wind, 2&nbsp;m dewpoint, and surface geopotential
+        (terrain height), for 28 input channels total, flattened into one
+        channel dimension (a 2D convolutional network). Surface geopotential
+        is not part of the real-time IFS feed, so it is taken once from
+        ERA5 and reused for every forecast.
+      </p>
+      <p>
+        Outputs: cold, warm, stationary, and occluded fronts, drylines,
+        troughs, and tropical troughs. Instability lines are not shown.
+      </p>
+      <p>
+        Trained with a neighborhood Brier loss over a square neighborhood,
+        against dilated (widened) front and trough labels (see "Loss
+        function" below).
+      </p>
+
+      <h3>Southern hemisphere</h3>
+      <p>
+        The model is trained only on northern hemisphere fronts, where
+        cyclones rotate counterclockwise. South of the equator the rotation
+        is reversed, so the raw input does not look like anything the
+        model was trained on.
+      </p>
+      <p>
+        Each forecast is run through the model twice. The first pass uses
+        the grid as published, and its northern hemisphere is what the map
+        shows. The second pass negates v-wind south of the equator and
+        flips the entire grid end to end before inference, then flips the
+        output back; its southern hemisphere is what the map shows there.
+        Flipping the whole grid rather than just the southern half keeps
+        each row's neighboring context intact instead of placing the south
+        pole next to the equator, at the cost of running inference twice
+        per lead time.
+      </p>
+
+      <h3>Loss function, in detail</h3>
+      <p>
+        The model is trained with a neighborhood Brier loss
+        (<a href="https://doi.org/10.1175/2007MWR2123.1" target="_blank" rel="noopener">Roberts and Lean 2008</a>;
+        <a href="https://doi.org/10.1175/MWR-D-22-0235.1" target="_blank" rel="noopener">Stein and Stoop 2024</a>).
+        Instead of scoring each pixel's predicted probability against the
+        exact labeled front location, the target is smoothed over a spatial
+        neighborhood, so a prediction placed close to a front is penalized
+        less than one placed far from any front. This suits a task where
+        even human analysts rarely agree on the exact placement of a front.
+      </p>
+      <p>
+        The neighborhood Brier loss remains a proper scoring rule
+        (<a href="https://doi.org/10.1198/016214506000001437" target="_blank" rel="noopener">Gneiting and Raftery 2007</a>):
+        a forecaster minimizes their expected loss only by reporting their
+        true belief about the probability of a front in that neighborhood,
+        with no incentive to hedge toward some other value. That property is
+        what lets the model's output be read directly as a probability
+        rather than as an arbitrary confidence score.
+      </p>
+
+      <h3>Data source</h3>
+      <p>
+        ECMWF IFS HRES (&ldquo;oper&rdquo;) forecasts at 0.25&deg; resolution, read
+        directly from the
+        <a href="https://registry.opendata.aws/ecmwf-forecasts/" target="_blank" rel="noopener">
+          ECMWF Open Data archive on AWS</a> (Amazon Web Services, <em>Registry of
+        Open Data: ECMWF Real-Time Forecasts</em>, s3://ecmwf-forecasts).
+      </p>
+
+      <h3>Update cadence</h3>
+      <p>
+        A poller checks every 5 minutes for each new IFS forecast cycle (00Z,
+        06Z, 12Z, 18Z) to start publishing, and runs inference on each lead
+        time as soon as ECMWF has actually published it. Lead times are
+        6-hourly only: 41 steps out to 240&nbsp;hours for 00Z/12Z cycles, and
+        25 steps out to 144&nbsp;hours for 06Z/18Z cycles. IFS itself
+        publishes some fields every 3&nbsp;hours out to 144h, but this
+        pipeline deliberately requests only the 6-hourly subset, so the map
+        never shows 3-hourly steps.
+      </p>
+
+      <h3>Serving</h3>
+      <p>
+        Inference runs on a home server, on CPU only. Each lead time is
+        run as its own tiled inference pass as soon as it becomes available,
+        rather than as one long batch job. A single step's run is capped at
+        a 3-hour timeout as a safety ceiling, well inside the 6-hour gap
+        between IFS cycles.
+      </p>
+    </div>
+  </div>
+
+  <!-- 2026-11-16 (startup-latency pass): pinned to the exact versions the
+       bare @5 ranges were resolving to anyway (confirmed 2026-11-16), so an
+       upstream release can never silently change what this page loads or
+       invalidate the head's modulepreload list. Keep in sync with the unpkg
+       CSS link and the modulepreload URLs above. (No HTML comments INSIDE
+       the script tag below -- importmap contents must be bare JSON.) -->
+  <script type="importmap">
+    {
+      "imports": {
+        "maplibre-gl": "https://esm.sh/maplibre-gl@5.24.1",
+        "@carbonplan/zarr-layer": "https://esm.sh/@carbonplan/zarr-layer@0.12.1"
+      }
+    }
+  </script>
+  <script type="module">
+    import maplibregl from "maplibre-gl";
+    import { ZarrLayer } from "@carbonplan/zarr-layer";
+    import {
+      CLASS_STYLE,
+      FRONT_DISCARD_BELOW,
+      FRONT_BIN_WIDTH,
+      FRONT_N_BINS,
+      frontBinBoundaries,
+      labeledTickIndices,
+      formatTickLabel,
+      frontLinesUrl,
+      withLineClasses,
+      lineColorExpression,
+      lineFilter,
+      solidLineFilter,
+      FRONT_SYMBOL_PATTERNS,
+      symbolImageName,
+      symbolFilter,
+      symbolPeriods,
+    } from "/dev/lib.js"; // absolute + dev-local: a snapshot of the live lib.js, so /dev does not depend on the host's drifting /lib.js and resolves the same with or without a trailing slash
+
+    // -----------------------------------------------------------------
+    // Config: which zarr pyramid store backs each model, and how each
+    // front class is colored.
+    //
+    // 2026-08-21 fix: the original approach tried to fade probability=0
+    // to invisible by making the *colormap*'s first stop
+    // `"rgba(0,0,0,0)"` -- @carbonplan/zarr-layer's colormap only accepts
+    // hex strings or [r,g,b] triples (confirmed against the real
+    // `dist/index.js` -- `ZarrLayer`'s constructor throws
+    // "colormap is required and must be an array of [r, g, b] or hex
+    // string values", and the shader only ever reads `c.rgb` from the
+    // colormap texture), so this threw live: `Invalid hex color:
+    // rgba(0,0,0,0)`.
+    //
+    // The colormap texture has no alpha channel to exploit, and the
+    // layer's `opacity` uniform is a single flat multiplier applied to
+    // every pixel -- there is no public-API way to make low-probability
+    // pixels transparent. The library's default fragment shader (read
+    // straight from the unminified npm tarball,
+    // `dist/index.js`'s `createFragmentShaderSource`) is:
+    //   float rescaled = (<band> - clim.x) / (clim.y - clim.x);
+    //   vec4 c = texture(colormap, vec2(rescaled, 0.5));
+    //   fragColor = vec4(c.rgb, opacity);
+    // i.e. alpha is always the flat `opacity` uniform, never a function
+    // of the data value. `customFrag` is the documented escape hatch for
+    // this ("customFrag owns discarding, band values incl. NaN are in
+    // scope") -- customClassFrag() below reimplements that same default
+    // body but with alpha = opacity * rescaled, so probability 0 is
+    // genuinely transparent and probability 1 is fully opaque. The single
+    // in-scope band variable is named after the ZarrLayer `variable`
+    // option verbatim when no multi-value `selector` is passed (see
+    // `getBands()` in the library source) -- that's why the class name
+    // (`cold`/`warm`/...) has to be spliced into the GLSL text itself,
+    // not just passed as a uniform.
+    // -----------------------------------------------------------------
+    const ZARR_ROOT = window.__ZARR_ROOT; // "/data" (prod tree) or "/data-dev" (?data=dev), set in the head script -- see deploy/Caddyfile
+
+    // Every store is written as zarr v3 (see frontfinder/zarrio/pyramid.py --
+    // zarr.consolidate_metadata() on a v3 store folds the consolidated
+    // listing into the root zarr.json itself; it does not write a v2-style
+    // top-level .zmetadata file). Without an explicit zarrVersion,
+    // @carbonplan/zarr-layer's underlying zarrita `open()` always probes v2
+    // first -- .zmetadata, then falls back to unconsolidated .zattrs/.zgroup
+    // -- and every one of those requests 404s before it ever tries v3's
+    // zarr.json. That's 3-4 wasted round trips per class layer, x4 classes,
+    // x every step built (current + prefetched neighbors), which is most of
+    // the reported slowness. Pinning the version skips the v2 probe
+    // entirely. Confirmed live, 2026-08-27.
+    const ZARR_VERSION = 3;
+
+    // Same fix for the other fetch @carbonplan/zarr-layer does on every
+    // layer init: with no explicit `bounds`/`latIsAscending`, it fetches the
+    // store's lat/lon coordinate arrays just to derive them (see the
+    // "[zarr-layer] Detected from coordinate arrays" console warning, which
+    // states these exact values). The grid is fixed -- global 0.25deg,
+    // pixel-registered, longitude -180..180, latitude descending (row 0 =
+    // north pole; see the Coriolis-correction commits) -- for every step of
+    // the only active model, so hardcoding it here skips that fetch too.
+    //
+    // 2026-08-29: root-caused a vertical truncation bug (data vanishing
+    // east of roughly -105 lon) to @carbonplan/zarr-layer's
+    // region-visibility math projecting the map's viewport (always signed
+    // -180..180 from maplibregl) against these bounds through a plain
+    // identity CRS transform with NO wraparound -- with bounds declared in
+    // the IFS-native 0..360 convention, every negative-longitude viewport
+    // (all of the Americas/Atlantic/Europe) produced negative/out-of-range
+    // store-column indices and silently fetched zero tiles there. Fixed by
+    // rolling longitude to -180..180 at serve time in
+    // frontfinder/zarrio/pyramid.py. Flipped to match here once the
+    // 2026-08-29T06Z cycle confirmed live stores are actually being
+    // written in that convention now (checked 0/lon on that store
+    // directly: -180.0 ... 179.75, ascending) -- this file is served
+    // straight off disk with no build step, so this MUST stay in sync
+    // with whatever pyramid.py is actually writing, not the other way
+    // around.
+    const GRID_BOUNDS = [-180.125, -90.125, 179.875, 90.125]; // [xMin, yMin, xMax, yMax]
+    const GRID_LAT_ASCENDING = false;
+
+    const MODELS = {
+      // 2026-10-08: replaced theta-e_uv_q as the served model.
+      nbs_square_dilation_trof_tt_no_inst: {
+        label: "nbs_square_dilation_trof_tt_no_inst",
+        latestPointer: `${ZARR_ROOT}/nbs_square_dilation_trof_tt_no_inst/latest.json`,
+      },
+      // model_1702 disabled -- see the HTML comment above and
+      // frontfinder/scheduler/cli.py. Re-add once the pipeline is producing
+      // its output again:
+      // model_1702: { label: "model_1702", latestPointer: `${ZARR_ROOT}/model_1702/latest.json` },
+    };
+    // Which models are shown by default. spix_wce_loss_modified_dilation was
+    // removed 2026-10-01 (no GPU use); with one model left the model-toggles
+    // panel is hidden in the HTML, but the multi-model machinery is intact.
+    const OPTIONAL_CLASSES = new Set(["dryline"]);
+    const DEFAULT_SELECTED_MODELS = ["nbs_square_dilation_trof_tt_no_inst"];
+    // CLASS_STYLE and the FRONT_* bin constants now live in ./lib.js (also
+    // imported by lib.test.js) so the color palette and bin math can be
+    // unit-tested without a browser. See lib.js for the palette's
+    // colorblind-safety rationale and validate_palette.js invocation.
+    //
+    // 2026-08-21, fourth pass: Taylor's explicit call after seeing the real
+    // distribution (a percentile check against a real production store
+    // showed median ~0.0002-0.0006 and per-class maxima only 0.42-0.63 --
+    // see the two earlier, wrong attempts in git history) was to use even
+    // 0.1-wide bins all the way to 1.0 anyway, rather than concentrate
+    // resolution in the 0-0.3 range where the data actually varies. That
+    // means bins above ~0.4-0.5 will rarely or never populate for this
+    // model/dataset -- known and intentional, not a bug -- headroom for
+    // future model versions or more extreme patterns matters more here than
+    // maximizing today's visual detail.
+
+    function customClassFrag(cls) {
+      // `cls` becomes the GLSL identifier for this band's decoded value
+      // (see the comment block above) -- safe here since CLASS_STYLE's
+      // keys are all plain lowercase words, valid GLSL identifiers with
+      // no interpolation risk.
+      //
+      // 2026-08-21: swapped from a smooth alpha gradient (alpha == the raw
+      // probability, so it faded continuously from transparent to opaque)
+      // to filled contour bands, per Taylor -- see the comment above
+      // FRONT_DISCARD_BELOW for how the actual bin widths were chosen
+      // (and the two earlier, wrong attempts before this one). Since
+      // `colormap` is still just two identical hex stops (see the
+      // comment above CLASS_STYLE), `c.rgb` is already a flat, single
+      // hue -- only opacity carries the banding, which is what produces
+      // hard edges instead of a smooth fill. `clim` (still [0,1] on the
+      // ZarrLayer constructor below) is intentionally NOT used for this
+      // banding -- the bins here are absolute probabilities, not a
+      // fraction of clim's range.
+      return `
+        if (isnan(${cls}_tex) || isnan(${cls})) {
+          discard;
+        }
+        float p = clamp(${cls}, 0.0, 1.0);
+
+        if (p < ${FRONT_DISCARD_BELOW.toFixed(3)}) {
+          discard; // background noise, not a front -- see comment above
+        }
+        // Evenly-spaced 0.1-wide bins from 0.1 up to 1.0, plus the
+        // narrower 0.05-0.1 "just above background" bin. Opacity ramps
+        // linearly across all ${FRONT_N_BINS} bins.
+        float bin = min(floor(p / ${FRONT_BIN_WIDTH.toFixed(3)}), ${(FRONT_N_BINS - 1).toFixed(1)});
+        float bandOpacity = (bin + 1.0) / ${FRONT_N_BINS.toFixed(1)};
+
+        vec4 c = texture(colormap, vec2(0.5, 0.5)); // flat hue -- see comment above
+        gl_FragColor = vec4(c.rgb, opacity * bandOpacity);
+        gl_FragColor.rgb *= gl_FragColor.a;
+      `;
+    }
+
+    const map = new maplibregl.Map({
+      container: "map",
+      // Positron vector basemap via OpenFreeMap (self-hosted OSM data,
+      // no API key) -- per Taylor's reference,
+      // https://madewithmaplibre.com/basemaps/styles/openfreemap-positron.
+      // Swapped 2026-08-21 from the raw OSM raster tile style above/before.
+      style: "https://tiles.openfreemap.org/styles/positron",
+      center: [-95, 40],
+      zoom: 3,
+      // 2026-08-21: needed for the hover tooltip's gl.readPixels() call
+      // below -- without this, the WebGL drawing buffer is cleared/swapped
+      // out immediately after each frame renders, so reading it back from
+      // a mousemove handler (which runs on its own, outside the render
+      // loop) returns all zeros. Confirmed this was the actual cause of an
+      // earlier, unrelated readPixels-always-zero problem investigated via
+      // the browser console. Costs a bit of extra GPU memory/bandwidth for
+      // the preserved buffer; negligible at this map's scale.
+      preserveDrawingBuffer: true,
+      // Keep the view (lat/lon/zoom) in the URL hash, same as
+      // spreadanomaly.espr.ai. Both sites read the hash on load, so a nav
+      // flip between them (spreadanomaly copies its live hash onto the
+      // Fronts link) reopens the map at the identical view, and browser
+      // back restores the view you left.
+      hash: true,
+    });
+    // Debugging aid: `map` is a module-scope binding, so it isn't reachable
+    // from the DevTools console (which evaluates in global/window scope)
+    // without this. Harmless to leave in permanently.
+    window.__map = map;
+    // -----------------------------------------------------------------
+    // Multi-model state, added 2026-09-17 (spix_wce_loss_modified_dilation).
+    // Everything below through showStep() used to be single-model globals
+    // (one `activeModel`, one `activeSteps`, one `layersByStep`, ...). Each
+    // model now gets its own independent copy of that same state/machinery
+    // in a `ModelState` object -- layer ids are namespaced by model key
+    // (`fronts-${model}-${cls}-${index}`) so two models' layers for "the
+    // same" step index never collide on the map.
+    //
+    // The time slider/play button are still singular (one shared timeline),
+    // driven by `primaryModel` -- whichever selected model is first in
+    // `MODELS`' declaration order. Every OTHER selected ("secondary") model
+    // is asked to display whatever step of ITS OWN activeSteps has the same
+    // step_hours as the primary's current step (see globalShowStep) --
+    // matching by step_hours rather than by raw array index tolerates a
+    // secondary model having gaps (e.g. one model's cycle failed a step)
+    // instead of assuming every selected model's step list is identical,
+    // even though in practice run_cycle.py runs every model over the same
+    // step list per cycle.
+    function makeModelState(key) {
+      return {
+        key,
+        // The full step list for the currently-loaded cycle (see
+        // resolveLatestRun) -- fetched once per model load, not re-fetched
+        // on every slider move, so dragging the slider is instant rather
+        // than round-tripping to latest.json each time.
+        expectedSteps: [], // lead hours the cycle is targeting (published or not)
+        activeSteps: [], // [{step_hours, valid_time, store}, ...] ascending
+        activeCycleTime: null,
+        loadError: null, // set on a failed/never-attempted resolveLatestRun
+        pollTimer: null, // see startPollingForNewSteps
+
+        // 2026-08-21: per-step layer cache, added because moving the slider
+        // back to an already-visited step was re-fetching/re-decoding every
+        // zarr chunk and rebuilding the GL layer from scratch every single
+        // time -- showStep() used to unconditionally clearLayers() + build 4
+        // brand-new ZarrLayers on every call. Now each step's 4 layers are
+        // built once (on first visit) and kept around; revisiting a step
+        // just flips it back to visible, which is instant. Layer ids are
+        // `fronts-${model}-${cls}-${stepIndex}` (namespaced by model since
+        // 2026-09-17, index-qualified since maplibre layer ids must be
+        // unique and every step now stays resident on the map instead of
+        // being removed) -- keyed in `layersByStep` by step index rather
+        // than by class alone.
+        //
+        // 2026-08-21, same day, follow-up fix: the first version of this
+        // cache hid a step by setting `layer.opacity = 0` instead of
+        // removing it -- confirmed live that this made the page get
+        // progressively laggier and more inconsistent the more steps you'd
+        // visited. `opacity` is just a shader multiply inside
+        // customClassFrag (see that function) -- the layer still renders a
+        // full pass EVERY FRAME regardless of its value, so every
+        // previously-visited step was silently still costing GPU time
+        // forever, on top of whatever memory its textures held. The actual
+        // fix is the `visibility` layout property
+        // (`map.setLayoutProperty(id, "visibility", "none")`), which
+        // maplibre honors for any layer type including custom ones -- a
+        // hidden layer is skipped by the renderer entirely, not just made
+        // transparent. `layer.opacity` is now left fixed at 0.85 always;
+        // `visibility` alone controls what's actually drawn (see
+        // setStepVisibility below).
+        //
+        // Also added: an MRU cache capped at MAX_CACHED_STEPS so GPU
+        // memory/texture count can't grow unbounded across a full cycle (up
+        // to ~40 steps) -- the least-recently-shown step's *GL layers* get
+        // removeLayer()'d (not just hidden) once the cap is exceeded.
+        //
+        // 2026-08-22: first tried uncapping this (Infinity) at the user's
+        // request so cycling back through valid times would never re-fetch.
+        // Confirmed live this was unsafe: scrubbing across ~20 steps (80
+        // live custom GL layers/textures) drove the WebGL context into an
+        // error flood ("WebGL: too many errors, no more errors will be
+        // reported to the console for this context", from maplibre's globe
+        // projection code) -- consistent with the browser's GPU process
+        // running out of texture memory, which silently breaks rendering
+        // for resident layers (reported as steps' fronts "disappearing").
+        //
+        // The actual fix: eviction here only needs to be cheap to
+        // *reverse*, not avoided entirely -- Caddy serves every zarr store
+        // path (`.zarr/*`, see deploy/Caddyfile's @zarrData block) with
+        // `Cache-Control: public, max-age=31536000, immutable`, confirmed
+        // live via curl on both a store's zarr.json and a chunk. So a
+        // step's zarr metadata + chunk bytes are already indefinitely
+        // cached by the browser's own HTTP cache once fetched once --
+        // evicting a step's GL layers here only discards GPU-side textures,
+        // not the underlying data. Rebuilding an evicted step is a local
+        // decode + re-upload from the HTTP cache, not a real network round
+        // trip, so a bounded cap gave "cycling back to any
+        // previously-visited step is fast," just without holding every
+        // step's textures on the GPU at once.
+        //
+        // 2026-08-23: uncapped again (Infinity) at Taylor's explicit
+        // request, this time to keep the whole cycle resident so the play
+        // button can loop indefinitely without ever re-showing a
+        // still-loading frame -- knowingly reintroducing the exact WebGL
+        // texture-exhaustion risk described above (a full cycle can be ~41
+        // steps / 164 live layers, well past the ~20-step/80-layer point
+        // where the browser's GPU process ran out of texture memory and
+        // rendering silently broke). If fronts start disappearing again
+        // during long playback loops, that failure mode is why -- lower
+        // this back down (16 was the last known stable value) or, better,
+        // replace this whole cache with one that reuses a fixed pool of GL
+        // layers and re-points their source per step instead of allocating
+        // new layers per step.
+        currentStepIndex: -1,
+        // 2026-08-25: the step whose layers are actually visible on the map
+        // right now, as opposed to `currentStepIndex` (the step the
+        // UI/playback *wants* shown, which may still be mid-fetch). Kept
+        // separate so a step change never has a window with nothing on
+        // screen -- see revealStep().
+        visibleStepIndex: -1,
+        layersByStep: new Map(), // stepIndex -> Map(cls -> ZarrLayer); insertion order == LRU order (oldest first)
+        // Per-step load bookkeeping: which classes' chunks are still
+        // loading, via ZarrLayer's onLoadingStateChange (see
+        // buildStepLayers). Also doubles as eviction protection -- see
+        // evictOldCachedStepsIfNeeded.
+        stepLoadState: new Map(), // stepIndex -> { pendingClasses, loaded, error, settleTimers }
+        buildingIndex: -1,
+        pendingIndex: null,
+        revealToken: 0, // see revealStep
+      };
+    }
+
+    const modelStates = new Map(Object.keys(MODELS).map((key) => [key, makeModelState(key)]));
+    const selectedModels = new Set(DEFAULT_SELECTED_MODELS);
+    // Whichever selected model currently drives the shared time
+    // slider/labels/play button -- see pickPrimaryModel.
+    let primaryModel = null;
+
+    function pickPrimaryModel() {
+      for (const key of Object.keys(MODELS)) {
+        if (selectedModels.has(key)) return key;
+      }
+      return null;
+    }
+
+    // MAX_CACHED_STEPS applies per model (each maintains its own
+    // layersByStep) -- see makeModelState's history comment above for why
+    // this is Infinity rather than a real cap. With N models selected
+    // simultaneously, GPU layer/texture count for a given step multiplies
+    // by N (4 class layers each) -- known, accepted tradeoff for showing
+    // more than one model at once.
+    const MAX_CACHED_STEPS = Infinity;
+    // Debounces the slider's oninput -> showStep() path; see the big
+    // comment in setupTimeSlider for why this exists.
+    let pendingShowStepTimer = null;
+    const SHOW_STEP_DEBOUNCE_MS = 120;
+
+    // 2026-08-23 fix (play button advancing before a frame's pixels have
+    // actually arrived): ZarrLayer's onLoadingStateChange is NOT a
+    // trustworthy "this class's chunk data is on screen" signal by itself.
+    // Traced through the (unminified via esm.sh) library source: adding a
+    // layer first runs its metadata phase (open the store, read array
+    // shapes) -- once that resolves, it kicks off the REAL chunk/pixel
+    // fetch fire-and-forget (not awaited) and, in the very same tick,
+    // flips `metadataLoading` back to false and fires
+    // onLoadingStateChange({loading:false, ...}) -- i.e. the "done
+    // loading" event we were gating on fires essentially the instant the
+    // pixel fetch *starts*, not when it finishes. Separately, the chunk
+    // fetch's own `chunksLoading` flag only ever flips true after an
+    // internal 80ms debounce (to avoid flashing a spinner for fast
+    // fetches) -- so a chunk fetch that resolves in under ~80ms toggles
+    // `chunksLoading` from false to false with NO event at all, meaning
+    // that fetch's actual completion is otherwise invisible to us.
+    // Net effect: every class was being marked "loaded" (and playback
+    // advanced) right as its real data started fetching, regardless of
+    // how long that fetch actually took.
+    //
+    // Fix: don't resolve a class the instant we see loading:false --
+    // arm a settle timer comfortably longer than the library's 80ms
+    // debounce first. If the library reports loading:true again before
+    // it fires (a slow-enough fetch actually got seen starting), the
+    // timer is cancelled and we wait for the next loading:false instead.
+    // Only a "no further loading activity for SETTLE_MS" quiet period
+    // counts as actually loaded -- see the onLoadingStateChange callback
+    // in buildStepLayers.
+    const SETTLE_MS = 150;
+
+    // 2026-08-22: serializes *new* step builds (steps not already in
+    // layersByStep), added because the debounce above only limits how often
+    // showStep() fires -- it does nothing to stop a single settled
+    // showStep() call, or a burst of them a debounce-interval apart while
+    // scrubbing steadily, from each kicking off 4 brand-new ZarrLayers (and
+    // their real network fetches) on top of whatever the previous step's
+    // fetches hadn't finished yet. Confirmed live: scrubbing across ~10
+    // never-before-visited steps in a couple seconds (well within what "the
+    // slider moving around like crazy" produces) queued 40 concurrent zarr
+    // chunk fetches against the browser's per-origin connection cap, which
+    // starved *all* of them, including whichever step the slider actually
+    // settled on -- so the map could sit blank for many seconds after the
+    // user stopped moving it, even though that final step's fetches had
+    // technically been issued early on.
+    //
+    // The fix: at most one never-before-seen step is ever being fetched at
+    // a time. `buildingIndex` is that step (or -1 if none); `pendingIndex`
+    // is the most recent *different* step requested while a build is
+    // already in flight -- only the latest such request is kept, so a fast
+    // scrub across many steps collapses to "finish whatever's loading, then
+    // load wherever the slider ended up," never a growing backlog. Revisits
+    // of already-cached steps (the common case once a session has warmed
+    // up) are unaffected -- those hit the `layersByStep.has()` cache-hit
+    // path in showStep() and are still instant. (`buildingIndex`/
+    // `pendingIndex`/`stepLoadState` now live on each model's own state
+    // object -- see makeModelState above -- so this gating is independent
+    // per model.)
+    // How many not-yet-visited neighboring steps to opportunistically
+    // prefetch (hidden) once the current step's own fetches settle and the
+    // browser is idle -- makes the single-step-at-a-time nudge of the
+    // slider (by far the most common interaction after the initial load)
+    // feel instant instead of re-triggering a fresh fetch every time.
+    const requestIdle = window.requestIdleCallback
+      ? (cb) => window.requestIdleCallback(cb, { timeout: 1000 })
+      : (cb) => setTimeout(cb, 200);
+    // Whether each class's checkbox is currently checked -- read when
+    // showing a step's layers, and mutated by the checkbox handler below.
+    // Separate from any single step's layers since it has to apply across
+    // every cached step, not just the one on screen.
+    const classVisible = new Map(Object.keys(CLASS_STYLE).map((cls) => [cls, true]));
+
+    // Shows or hides every class layer belonging to `index` via the
+    // `visibility` layout property (see the big comment above for why
+    // this replaced toggling `opacity`). When showing, a class stays
+    // hidden anyway if its checkbox is currently unchecked.
+    function setStepVisibility(state, index, visible) {
+      const stepLayers = state.layersByStep.get(index);
+      if (!stepLayers) return;
+      for (const cls of stepLayers.keys()) {
+        const id = `fronts-${state.key}-${cls}-${index}`;
+        if (!map.getLayer(id)) continue;
+        const show = visible && classVisible.get(cls);
+        map.setLayoutProperty(id, "visibility", show ? "visible" : "none");
+      }
+    }
+
+    // Swaps on-screen visibility to `index`'s layers -- and only to
+    // `index`'s layers -- the moment they're actually ready to show.
+    // Whatever was visible before stays visible, alone, until `index`'s
+    // layers have actually finished painting (see the RENDER_SETTLE_MS
+    // comment below) -- at which point the swap happens as a single atomic
+    // step (see the 2026-08-26 "no cross-fade" note further down), so
+    // there's never a frame with nothing on screen, a half-loaded step, or
+    // two different valid times' data blended together; see showStep/
+    // onStepFullyLoaded for the two places this gets called once `index` is
+    // confirmed ready.
+    //
+    // 2026-08-25: a network/decode-complete signal (stepLoadState.loaded)
+    // is NOT the same as "this layer has actually been painted." Traced
+    // through MapLibre's own source (unpkg maplibre-gl@5, unminified names
+    // aside): for a *custom* layer (what ZarrLayer is), both the offscreen
+    // pass (which calls the layer's `prerender()` -- confirmed via
+    // grep, ZarrLayer's prerender() is where it calls
+    // `this.regionRenderer.update(this.map, this.gl)`, its actual GPU-side
+    // tile/texture work) and the main translucent-pass `render()` call are
+    // gated on `!layer.isHidden()` in the painter's per-layer render loop --
+    // a hidden custom layer's prerender/render are simply never invoked, no
+    // matter how many chunks have already arrived over the network. So
+    // every layer we kept hidden while "loading" (deliberately, to avoid
+    // showing a half-fetched frame) had done *zero* GPU-side work by the
+    // time we flipped it visible -- the reveal frame was always its first
+    // real paint, cold.
+    //
+    // 2026-08-26: the first fix for that (wait 2 real "render" events, then
+    // hide the outgoing step) was still wrong -- just a shorter-lived
+    // version of the same blank-flash bug, confirmed by instrumenting a
+    // live run: after those 2 events fired and the outgoing step was
+    // hidden, the incoming step's own pixels were frequently still not on
+    // screen for another 1-3+ seconds. Traced into the actual
+    // @carbonplan/zarr-layer bundle (esm.sh, unminified): a cold layer's
+    // `regionRenderer` doesn't finish its GPU work in that first prerender()
+    // call -- it streams content in progressively over many real frames,
+    // self-driving further repaints via the layer's own
+    // `invalidate()` (`this.tileNeedsRender = true; map.triggerRepaint()`)
+    // for as long as it still has more to paint. `render()` only flips
+    // `tileNeedsRender` back to `false` once it actually paints that
+    // layer's current content -- so that flag is a real per-layer "has this
+    // finished catching up" signal, exposed on every ZarrLayer instance.
+    //
+    // Also confirmed live: waiting on the map's global "render" event to go
+    // quiet (rather than reading `tileNeedsRender` directly) is NOT safe
+    // during autoplay -- "render" fires for any reason the map repaints,
+    // including an unrelated *future* step's `buildStepLayers()` calling
+    // `map.addLayer()` while this step's warmup is still pending, which
+    // resets a global-event-based settle timer indefinitely and can starve
+    // it past its own hard cap.
+    //
+    // Fix: keep the outgoing step visible and poll the incoming step's own
+    // layers' `tileNeedsRender` directly until none of them have needed a
+    // repaint for RENDER_SETTLE_MS -- i.e. its regionRenderer has actually
+    // caught up, not just been asked to start. RENDER_HARD_CAP_MS is a
+    // backstop so a step that (for whatever reason) never goes quiet can't
+    // wedge playback/scrubbing forever; it just hides the outgoing step
+    // late instead.
+    //
+    // 2026-08-26, no cross-fade: the above got the *timing* of the swap
+    // right but not its visual shape -- it made the incoming step visible
+    // (translucent, full opacity) as soon as warm-up started, stacked right
+    // on top of the still-visible outgoing step for the whole settle
+    // window, so the two valid times' fronts were genuinely blended
+    // together on screen, not just briefly both-present. Per Taylor,
+    // timesteps need to read as discrete -- never mixed, even briefly. See
+    // revealStep: the incoming step now warms up at `opacity: 0` (still
+    // `visibility: visible`, so it keeps actually painting -- see the
+    // isHidden() paragraph above for why that distinction matters) while
+    // `previous` stays the only thing actually shown, and the swap to the
+    // incoming step's real opacity + `previous` hidden happens in one
+    // synchronous pass once warm-up settles -- a hard cut, not a fade.
+    const RENDER_SETTLE_MS = 400;
+    const RENDER_SETTLE_POLL_MS = 80;
+    const RENDER_HARD_CAP_MS = 6000;
+
+    // Moves the on-screen label/slider/tooltip state to `index` -- split out
+    // of revealStep so it can fire at the moment `index` actually becomes
+    // what's on screen, whether that's immediate (no cross-fade needed) or
+    // deferred until a warm-up swap completes (see revealStep).
+    function markStepVisible(state, index) {
+      state.visibleStepIndex = index;
+      // The time label/slider/tooltip are page-global, singular UI -- only
+      // the primary model (the one driving the shared timeline) gets to
+      // move them. A secondary model reaching this point still had its own
+      // GL layers actually swapped on screen by the code above; it just
+      // doesn't also rewrite labels that describe a DIFFERENT model's step
+      // list. See the multi-model design note above makeModelState.
+      if (state.key !== primaryModel) {
+        hideClickTooltip();
+        return;
+      }
+      // The time label/slider position move here too, not in showStep() --
+      // otherwise (e.g. during autoplay) the displayed time races ahead of
+      // the frame actually on screen, showing a valid_time that doesn't
+      // match what's rendered yet. Manual slider dragging still gets
+      // immediate label feedback via previewStepLabel (see setupTimeSlider)
+      // -- that's a deliberate exception for drag responsiveness, separate
+      // from this reveal-gated update.
+      const step = state.activeSteps[index];
+      if (step) {
+        document.getElementById("time-valid").textContent = formatHumanUTC(step.valid_time);
+        document.getElementById("time-lead").textContent = formatForecastHour(step.step_hours);
+      }
+      setSliderSlot(slotOfIndex(state, index));
+      renderStepTicks(state, index);
+      hideClickTooltip(); // last reading belongs to whatever was visible before
+      refreshFrontLines(); // optional overlay: follows the step that is actually on screen
+    }
+
+    function revealStep(state, index) {
+      const previous = state.visibleStepIndex;
+      const token = ++state.revealToken;
+      if (previous === -1 || previous === index) {
+        // Nothing to cross from (first-ever reveal, or re-revealing what's
+        // already showing) -- just show it directly. Also hides every other
+        // cached step as a backstop (see the same hide-everyone-else loop
+        // in swap() below for why `previous` alone isn't trustworthy).
+        //
+        // Restoring opacity here (not just visibility) matters now:
+        // buildStepLayers() warms a new step up at opacity 0 (see its
+        // comment) so MapLibre keeps calling prerender() while it's still
+        // fetching -- this is the first point after that where the step is
+        // actually ready, so it's also the first point where the zeroed
+        // opacity needs undoing.
+        const stepLayers = state.layersByStep.get(index);
+        if (stepLayers) {
+          for (const [cls, layer] of stepLayers) {
+            if (classVisible.get(cls)) layer.setOpacity(0.85);
+          }
+        }
+        setStepVisibility(state, index, true);
+        for (const i of state.layersByStep.keys()) {
+          if (i !== index) setStepVisibility(state, i, false);
+        }
+        markStepVisible(state, index);
+        return;
+      }
+      // 2026-08-26, per Taylor: two different valid times' fronts should
+      // never be on screen blended together, even briefly -- the previous
+      // fix for the blank-flash bug kept `previous` and `index` both fully
+      // visible (translucent, overlapping) for a warm-up window, which
+      // technically avoided a *blank* frame but produced a genuinely wrong
+      // one instead (two timesteps' data superimposed).
+      //
+      // Fix: warm `index`'s layers up fully hidden from the viewer, then
+      // swap atomically. `visibility: visible` + `opacity: 0` keeps them
+      // invisible while still having MapLibre actually call their
+      // prerender()/render() every frame (a `visibility: none` layer's
+      // never do -- see the big comment above), so they can catch up
+      // exactly like before, with `previous` fully opaque and alone the
+      // entire time. Once caught up (same tileNeedsRender settle check as
+      // before), flip `index` to its real opacity and `previous` to
+      // `visibility: none` in the same synchronous pass, so MapLibre paints
+      // both changes together in one frame -- a hard cut, not a cross-fade.
+      //
+      // `opacity` here is ZarrLayer's own `setOpacity()` method
+      // (`this.opacity`, read directly in its render() uniforms), not a
+      // MapLibre style paint property -- custom layers aren't managed
+      // through `map.setPaintProperty()` at all, only `visibility` (a
+      // generic layout property every layer type supports) goes through
+      // the map. Confirmed against the library source (esm.sh, unminified).
+      const stepLayers = state.layersByStep.get(index) || new Map();
+      const warmLayers = [];
+      for (const [cls, layer] of stepLayers) {
+        const id = `fronts-${state.key}-${cls}-${index}`;
+        if (!map.getLayer(id)) continue;
+        map.setLayoutProperty(id, "visibility", classVisible.get(cls) ? "visible" : "none");
+        layer.setOpacity(0);
+        if (classVisible.get(cls)) warmLayers.push(layer);
+      }
+      let quietSince = null;
+      const swap = () => {
+        clearInterval(pollTimer);
+        clearTimeout(hardCapTimer);
+        if (token !== state.revealToken) {
+          // A newer reveal was requested (autoplay's next tick, or the user
+          // scrubbing further) before this one finished warming up -- undo
+          // the warm-up instead of showing a step that's already stale.
+          // Without this, both this step and whatever superseded it would
+          // end up visible at once, since each reveal only hides its own
+          // captured `previous`, not any step another in-flight reveal has
+          // since shown -- this is what left every step visible while
+          // stepping forward.
+          setStepVisibility(state, index, false);
+          return;
+        }
+        for (const [cls, layer] of stepLayers) {
+          const id = `fronts-${state.key}-${cls}-${index}`;
+          if (map.getLayer(id) && classVisible.get(cls)) layer.setOpacity(0.85);
+        }
+        // Hide every other cached step, not just `previous` -- `previous`
+        // can be stale by the time an async swap actually fires (see the
+        // token check above), so this is the real backstop against leaving
+        // more than one step visible.
+        for (const i of state.layersByStep.keys()) {
+          if (i !== index) setStepVisibility(state, i, false);
+        }
+        markStepVisible(state, index);
+        map.triggerRepaint();
+      };
+      const pollTimer = setInterval(() => {
+        const stillPainting = warmLayers.some((l) => l.tileNeedsRender);
+        if (stillPainting) {
+          quietSince = null;
+          return;
+        }
+        if (quietSince === null) quietSince = Date.now();
+        if (Date.now() - quietSince >= RENDER_SETTLE_MS) swap();
+      }, RENDER_SETTLE_POLL_MS);
+      const hardCapTimer = setTimeout(swap, RENDER_HARD_CAP_MS);
+      map.triggerRepaint();
+    }
+
+    // Removes the least-recently-shown cached step(s) once the cache
+    // exceeds MAX_CACHED_STEPS -- `layersByStep`'s insertion order is kept
+    // as LRU order (showStep() re-inserts a step on every cache hit to
+    // move it to the MRU end), so the oldest entry is always first.
+    // 2026-08-22: skips the current step, the step actively being built,
+    // and any step whose chunks are still loading (stepLoadState says
+    // `loaded: false`) -- evicting one of those used to be possible if
+    // enough *other* steps got visited first, which would removeLayer() a
+    // ZarrLayer out from under its own in-flight fetches. Confirmed this
+    // was reachable: with MAX_CACHED_STEPS=8, a slow connection, and a fast
+    // scrub, a step queued via `pendingIndex` (see above) could still be
+    // sitting in layersByStep mid-fetch by the time 8 other builds pushed
+    // it toward the front of the LRU order. If every cached entry is
+    // currently protected, this just leaves the cache oversized until the
+    // next call once something finishes loading -- self-correcting, and far
+    // better than aborting a fetch that's about to pay off.
+    function evictOldCachedStepsIfNeeded(state) {
+      for (const [index, stepLayers] of state.layersByStep) {
+        if (state.layersByStep.size <= MAX_CACHED_STEPS) break;
+        if (index === state.currentStepIndex || index === state.visibleStepIndex || index === state.buildingIndex) continue;
+        const loadState = state.stepLoadState.get(index);
+        if (loadState && !loadState.loaded) continue;
+        for (const cls of stepLayers.keys()) {
+          const id = `fronts-${state.key}-${cls}-${index}`;
+          if (map.getLayer(id)) map.removeLayer(id);
+        }
+        state.layersByStep.delete(index);
+        state.stepLoadState.delete(index);
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Legend (bottom-right card) + click-to-query tooltip.
+    // 2026-08-21, per Taylor's request + attached reference screenshot.
+    // 2026-08-23: switched from a continuous approximate hover readout
+    // (derived from rendered pixel color via gl.readPixels) to a
+    // click-triggered exact readout via ZarrLayer's queryData(), which
+    // reads the real decoded zarr value at a point. The pixel-color
+    // approach had two real bugs in practice: it could freeze on stale
+    // cursor positions (maplibre only fires "render" on repaint, so a
+    // reading could outlive the cursor leaving a front), and it reported
+    // wrong values wherever the Positron basemap's own faint tint (water,
+    // parks) or overlapping classes' sequential (non-additive) blending
+    // confused the pixel-color-to-probability inversion. queryData reads
+    // the underlying data directly, so neither failure mode applies.
+    // -----------------------------------------------------------------
+
+    // Colorbar: each class's band row gets a tick mark under every bin
+    // boundary plus a numeric label under every other one, so the bands
+    // read as a real colorbar rather than a bare min/max-labeled swatch --
+    // per Taylor's reference, https://hazard.degreeday.org/?layer=wildfire.
+    // Boundaries/labels come from lib.js's frontBinBoundaries()/
+    // labeledTickIndices() so the ticks can never drift out of sync with
+    // the bins customClassFrag actually renders. Positions are equal-width
+    // fractions matching the legend-band flex segments below (each bin
+    // renders as one equal-width flex cell regardless of its real
+    // probability width), not positions proportional to the probability
+    // values themselves.
+    //
+    // All 11 boundaries labeled was tried first and rejected: screenshotted
+    // the rendered legend at this card's width and the 9px labels
+    // overlapped into unreadable smashed text (narrowest gap, 0.05 next to
+    // 0.1, has no room for two ~4-char labels side by side). Every other
+    // boundary gets a number; every boundary still gets an unlabeled tick
+    // mark so the bin edges stay visible.
+    function buildTicks() {
+      const marks = frontBinBoundaries()
+        .map((_, i) => `<span class="legend-tick-mark" style="left:${(i / FRONT_N_BINS) * 100}%"></span>`)
+        .join("");
+      const labels = labeledTickIndices()
+        .map(
+          ({ value, index }) =>
+            `<span class="legend-tick-label" style="left:${(index / FRONT_N_BINS) * 100}%">${formatTickLabel(value)}</span>`
+        )
+        .join("");
+      return marks + labels;
+    }
+
+    function buildLegend() {
+      const body = document.getElementById("legend-body");
+      body.innerHTML = "";
+      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
+        const bands = [];
+        for (let bin = 0; bin < FRONT_N_BINS; bin++) {
+          const bandOpacity = (bin + 1) / FRONT_N_BINS;
+          bands.push(
+            `<span class="legend-band" style="background:${style.color}; opacity:${(0.85 * bandOpacity).toFixed(2)}"></span>`
+          );
+        }
+        const row = document.createElement("div");
+        row.className = "legend-row";
+        row.innerHTML = `
+          <div class="legend-label">${style.label}</div>
+          <div class="legend-bands">${bands.join("")}</div>
+          <div class="legend-ticks">${buildTicks()}</div>
+        `;
+        body.appendChild(row);
+      }
+    }
+
+    function hideClickTooltip() {
+      document.getElementById("click-tooltip").style.display = "none";
+    }
+
+    // Bumped on every click so a slow queryData() from an earlier click
+    // can't clobber a newer one if it resolves out of order.
+    let clickRequestId = 0;
+
+    async function updateClickTooltip(e) {
+      const tooltip = document.getElementById("click-tooltip");
+      // Toggle: a click while the tooltip is showing dismisses it, no
+      // matter where on the map it lands -- the next click starts fresh.
+      if (tooltip.style.display === "block") {
+        clickRequestId++; // invalidate any in-flight query from that first click
+        hideClickTooltip();
+        return;
+      }
+      // MapLibre's lngLat can land outside -180..180 when the map is
+      // scrolled to a wrapped copy of the world -- queryData matches
+      // against the store's own -180..180 coordinate range (see
+      // GRID_BOUNDS), so an unwrapped click on a wrapped copy would miss
+      // and queryData would silently come back empty. Confirmed live,
+      // 2026-08-27 (the store's longitude convention was still 0-360 at
+      // the time, so this used to wrap into 0-360 instead -- see
+      // GRID_BOUNDS's 2026-08-29 comment for why that changed).
+      const lng = (((e.lngLat.lng + 180) % 360) + 360) % 360 - 180;
+      const point = { type: "Point", coordinates: [lng, e.lngLat.lat] };
+      const requestId = ++clickRequestId;
+
+      // Queries every SELECTED model's currently-on-screen step (not
+      // currentStepIndex -- that can be a step still mid-fetch, whose
+      // layers exist but have no real data to query yet), and, per model,
+      // every visible class -- so clicking with two models shown reads both.
+      const modelResults = await Promise.all(
+        [...selectedModels].map(async (key) => {
+          const state = modelStates.get(key);
+          if (state.visibleStepIndex === -1) return null;
+          const stepLayers = state.layersByStep.get(state.visibleStepIndex);
+          if (!stepLayers) return null;
+          const classResults = await Promise.all(
+            Object.entries(CLASS_STYLE).map(async ([cls, style]) => {
+              if (!classVisible.get(cls) || !stepLayers.has(cls)) return null;
+              try {
+                // 'finest' so the reading doesn't depend on the current
+                // zoom's resolution level -- the point clicked should read
+                // the same value whether zoomed in or out.
+                const result = await stepLayers.get(cls).queryData(point, undefined, { level: "finest" });
+                const value = result[cls]?.[0];
+                return typeof value === "number" && Number.isFinite(value) ? { style, value } : null;
+              } catch {
+                return null; // layer removed/evicted mid-query, e.g. a fast step change
+              }
+            })
+          );
+          // Finite zero is a real reading, not missing: uint8 stores
+          // quantize all sub-quantum probabilities (< 1/254 ~ 0.004) to an
+          // exact 0 code where a float32 store carries tiny nonzero dust,
+          // so the `value > 0` this filter used to test dropped every
+          // quantized-to-zero class row -- and the entire tooltip at an
+          // all-background point -- from the uint8 pages while the float32
+          // pages kept showing their "0%" rows for the same points. NaN
+          // rows (real float NaNs and the uint8 _FillValue sentinel, now
+          // declared to the layer via fillValue above) are still excluded
+          // by the Number.isFinite check above.
+          return { key, classResults: classResults.filter((r) => r && r.value >= 0) };
+        })
+      );
+      if (requestId !== clickRequestId) return; // superseded by a newer click
+
+      const activeResults = modelResults.filter((m) => m && m.classResults.length > 0);
+      if (activeResults.length === 0) {
+        hideClickTooltip();
+        return;
+      }
+      // Only label each block with its model name when more than one model
+      // is selected -- the single-model case reads exactly as it always
+      // has.
+      const multiModel = selectedModels.size > 1;
+      const lines = [];
+      for (const { key, classResults } of activeResults) {
+        if (multiModel) lines.push(`<strong>${MODELS[key].label}</strong>`);
+        for (const r of classResults) {
+          lines.push(`<span class="swatch" style="background:${r.style.color}"></span>${r.style.label}: ${(r.value * 100).toFixed(0)}%`);
+        }
+      }
+      tooltip.innerHTML = lines.join("<br>");
+      tooltip.style.left = `${e.originalEvent.clientX + 14}px`;
+      tooltip.style.top = `${e.originalEvent.clientY + 14}px`;
+      tooltip.style.display = "block";
+    }
+
+    function setMeta(text, isError = false) {
+      const el = document.getElementById("meta");
+      el.textContent = text;
+      el.classList.toggle("error", isError);
+    }
+
+    function buildClassToggles() {
+      const container = document.getElementById("class-toggles");
+      container.innerHTML = "";
+      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
+        const row = document.createElement("label");
+        row.className = "class-row";
+        row.innerHTML = `
+          <input type="checkbox" data-class="${cls}" checked />
+          <span class="swatch" style="background:${style.color}"></span>
+          ${style.label}
+        `;
+        row.querySelector("input").addEventListener("change", (e) => {
+          classVisible.set(cls, e.target.checked);
+          // Only the actually-visible step needs updating live -- every
+          // other cached step reads classVisible itself the next time
+          // it's shown (see showStep/setStepVisibility below). Uses
+          // visibleStepIndex, not currentStepIndex, since the target step
+          // may still be mid-fetch and not the one on screen yet. Applies
+          // to every currently SELECTED model, not just the primary one.
+          for (const key of selectedModels) {
+            const state = modelStates.get(key);
+            setStepVisibility(state, state.visibleStepIndex, true);
+          }
+          hideClickTooltip(); // last reading may include/omit this class's now-stale visibility
+          applyFrontLineFilters(); // the class's front lines follow its checkbox too
+        });
+        container.appendChild(row);
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Optional "Front lines" overlay. Off by default; nothing is fetched
+    // until the checkbox is on. The scheduler writes one GeoJSON of smooth,
+    // typed front lines per step (frontfinder/postprocess/front_lines.py)
+    // and lists it as `fronts` on that step's latest.json entry. This only
+    // ever draws the PRIMARY model's visible step, on its own GeoJSON source
+    // + three line layers, independent of the zarr probability layers (it
+    // does not touch their visibility, opacity or caching).
+    //
+    // Longitudes in these files are never cut at the antimeridian (a front
+    // crossing 180 reads 175, 185, ...), which MapLibre draws as one line.
+    // -----------------------------------------------------------------
+    const FRONT_LINES_SOURCE = "front-lines";
+    const SYMBOL_LAYER_PREFIX = "front-lines-symbols-";
+    const FRONT_LINE_LAYERS = [
+      "front-lines-casing",
+      "front-lines-solid",
+      "front-lines-dashed",
+      ...symbolPeriods().map((period) => `${SYMBOL_LAYER_PREFIX}${period}`), // drawn last, on top of the lines
+    ];
+    const EMPTY_LINES = { type: "FeatureCollection", features: [] };
+    const FRONT_LINES_CACHE_MAX = 12; // steps kept in memory (~100 kB each)
+    const frontLinesCache = new Map(); // url -> tagged FeatureCollection, oldest first
+    let frontLinesEnabled = false;
+    let frontLinesToken = 0; // a newer refresh supersedes an older in-flight fetch
+
+    function setFrontLinesStatus(text) {
+      document.getElementById("front-lines-status").textContent = text;
+    }
+
+    function visibleClasses() {
+      return [...classVisible].filter(([, visible]) => visible).map(([cls]) => cls);
+    }
+
+    // Front symbols: one repeating tile per (class, side), drawn on a canvas
+    // and registered as a map image. The tile is `period` px wide with the
+    // line through its middle; symbols sit on it with their base on the line,
+    // pointing up (the line's LEFT while walking along it) or down (its
+    // RIGHT). MapLibre rotates the tile with the line and repeats it every
+    // `period` px (see the symbol layers below). Patterns: lib.js
+    // FRONT_SYMBOL_PATTERNS. Drawn at 2x for sharpness (pixelRatio 2).
+    const SYMBOL_SCALE = 2;
+    const SYMBOL_HALF_WIDTH = 6; // px: triangles are 12 wide, semicircles 12 across
+    const SYMBOL_HEIGHT = 10; // px: how far a triangle points off the line
+    const SYMBOL_TILE_HEIGHT = 28; // px, line through the middle; leaves room above and below the symbols
+
+    function drawSymbolTile(cls, side) {
+      const { period, symbols } = FRONT_SYMBOL_PATTERNS[cls];
+      const w = period * SYMBOL_SCALE;
+      const h = SYMBOL_TILE_HEIGHT * SYMBOL_SCALE;
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      const cy = h / 2;
+      for (const seg of FRONT_SYMBOL_PATTERNS[cls].line ?? []) {
+        ctx.beginPath();
+        ctx.moveTo(seg.from * w, cy);
+        ctx.lineTo(seg.to * w, cy);
+        ctx.lineWidth = 3 * SYMBOL_SCALE;
+        ctx.lineCap = "butt";
+        ctx.strokeStyle = seg.color;
+        ctx.stroke();
+      }
+      for (const symbol of symbols) {
+        const cx = symbol.at * w;
+        const r = SYMBOL_HALF_WIDTH * SYMBOL_SCALE;
+        const left = (symbol.side === "same") === (side === "left"); // true: this symbol points to the line's left
+        const dir = left ? -1 : 1; // canvas y grows downward, so "up" is -1
+        ctx.beginPath();
+        if (symbol.shape === "triangle") {
+          ctx.moveTo(cx - r, cy);
+          ctx.lineTo(cx + r, cy);
+          ctx.lineTo(cx, cy + dir * SYMBOL_HEIGHT * SYMBOL_SCALE);
+        } else {
+          ctx.arc(cx, cy, r, left ? Math.PI : 0, left ? 2 * Math.PI : Math.PI, false);
+        }
+        ctx.closePath();
+        ctx.fillStyle = symbol.color;
+        ctx.fill();
+        ctx.lineWidth = SYMBOL_SCALE; // thin dark outline, like the line casing
+        ctx.strokeStyle = "rgba(11, 14, 22, 0.7)";
+        ctx.stroke();
+      }
+      return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
+    }
+
+    function registerFrontSymbolImages() {
+      for (const cls of Object.keys(FRONT_SYMBOL_PATTERNS)) {
+        for (const side of ["left", "right"]) {
+          const name = symbolImageName(cls, side);
+          if (!map.hasImage(name)) map.addImage(name, drawSymbolTile(cls, side), { pixelRatio: SYMBOL_SCALE });
+        }
+      }
+    }
+
+    function ensureFrontLineLayers() {
+      if (map.getSource(FRONT_LINES_SOURCE)) return;
+      map.addSource(FRONT_LINES_SOURCE, { type: "geojson", data: EMPTY_LINES });
+      // `zoom` may only be the input of a top-level interpolate/step, so the
+      // casing (2px wider all round) gets its own expression, not `width + 2`.
+      const width = ["interpolate", ["linear"], ["zoom"], 1, 1.4, 6, 2.6, 10, 3.6];
+      const casingWidth = ["interpolate", ["linear"], ["zoom"], 1, 3.4, 6, 4.6, 10, 5.6];
+      const line = { "line-cap": "round", "line-join": "round" };
+      // Dark casing under the colored line keeps it legible over both the
+      // pale (low probability) and saturated (high probability) rasters.
+      map.addLayer({
+        id: "front-lines-casing", type: "line", source: FRONT_LINES_SOURCE, layout: line,
+        paint: { "line-color": "#0b0e16", "line-opacity": 0.55, "line-width": casingWidth },
+      });
+      map.addLayer({
+        id: "front-lines-solid", type: "line", source: FRONT_LINES_SOURCE, layout: line,
+        paint: { "line-color": lineColorExpression(), "line-width": width },
+      });
+      map.addLayer({
+        id: "front-lines-dashed", type: "line", source: FRONT_LINES_SOURCE, layout: line,
+        paint: { "line-color": lineColorExpression(), "line-width": width, "line-dasharray": [3, 2] },
+      });
+      registerFrontSymbolImages();
+      for (const period of symbolPeriods()) {
+        // `symbol-spacing` is not data-driven, so each tile width (cold/warm:
+        // 26 px, occluded/stationary: 52 px) gets its own layer. Spacing and
+        // icon size shrink together at low zoom so tiles still butt up.
+        const sizeAt = (z) => ({ 1: 0.6, 6: 0.85, 10: 1 })[z];
+        map.addLayer({
+          id: `${SYMBOL_LAYER_PREFIX}${period}`, type: "symbol", source: FRONT_LINES_SOURCE,
+          layout: {
+            "symbol-placement": "line",
+            "symbol-spacing": ["interpolate", ["linear"], ["zoom"], 1, period * sizeAt(1), 6, period * sizeAt(6), 10, period * sizeAt(10)],
+            "icon-image": ["concat", "front-sym-", ["get", "cls"], "-", ["get", "side"]],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 1, sizeAt(1), 6, sizeAt(6), 10, sizeAt(10)],
+            "icon-rotation-alignment": "map",
+            "icon-pitch-alignment": "map",
+            "icon-keep-upright": false, // the tile's "up" must stay the line's left, however it is oriented on screen
+            "icon-allow-overlap": true,
+            "icon-ignore-placement": true,
+          },
+        });
+      }
+      applyFrontLineFilters();
+    }
+
+    // The class checkboxes apply to the lines too: an unchecked class hides
+    // both its raster layer and its lines.
+    function applyFrontLineFilters() {
+      if (!map.getLayer("front-lines-solid")) return;
+      const shown = visibleClasses();
+      map.setFilter("front-lines-solid", solidLineFilter(shown));
+      map.setFilter("front-lines-dashed", lineFilter(true, shown));
+      // The casing follows whichever of the two draws that feature.
+      map.setFilter("front-lines-casing", ["in", ["get", "cls"], ["literal", shown]]);
+      for (const period of symbolPeriods()) map.setFilter(`${SYMBOL_LAYER_PREFIX}${period}`, symbolFilter(period, shown));
+    }
+
+    // New zarr layers are added on top of the stack as steps get visited;
+    // keep the lines above all of them.
+    function raiseFrontLines() {
+      for (const id of FRONT_LINE_LAYERS) if (map.getLayer(id)) map.moveLayer(id);
+    }
+
+    function clearFrontLines() {
+      map.getSource(FRONT_LINES_SOURCE)?.setData(EMPTY_LINES);
+    }
+
+    async function fetchFrontLines(url) {
+      const cached = frontLinesCache.get(url);
+      if (cached) return cached;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      const tagged = withLineClasses(await res.json());
+      frontLinesCache.set(url, tagged);
+      while (frontLinesCache.size > FRONT_LINES_CACHE_MAX) frontLinesCache.delete(frontLinesCache.keys().next().value);
+      return tagged;
+    }
+
+    // Shows the lines for whatever step of the primary model is on screen
+    // (or clears them). Called when the checkbox changes, when a new step is
+    // revealed, and when new steps are published.
+    async function refreshFrontLines() {
+      const token = ++frontLinesToken;
+      if (!frontLinesEnabled) {
+        clearFrontLines();
+        setFrontLinesStatus("");
+        return;
+      }
+      const state = modelStates.get(primaryModel);
+      const step = state?.activeSteps[state.visibleStepIndex];
+      if (!step) return; // nothing on screen yet; revealing a step calls this again
+      const url = frontLinesUrl(ZARR_ROOT, state.key, step);
+      if (!url) {
+        clearFrontLines();
+        setFrontLinesStatus("(none for this step)");
+        return;
+      }
+      try {
+        const lines = await fetchFrontLines(url);
+        if (token !== frontLinesToken) return; // superseded while fetching
+        ensureFrontLineLayers();
+        map.getSource(FRONT_LINES_SOURCE).setData(lines);
+        raiseFrontLines();
+        // Symbols need the 850 hPa fields to be placed on the right side; a
+        // step without them (see front_lines.py) shows plain lines.
+        setFrontLinesStatus(lines.oriented ? "" : "(no symbols for this step)");
+      } catch (err) {
+        if (token !== frontLinesToken) return;
+        console.error(err);
+        clearFrontLines();
+        setFrontLinesStatus("(unavailable)");
+      }
+    }
+
+    function setupFrontLinesToggle() {
+      const checkbox = document.getElementById("front-lines-checkbox");
+      // ?lines=1 opens the page with the overlay already on (shareable link).
+      frontLinesEnabled = new URLSearchParams(location.search).get("lines") === "1";
+      checkbox.checked = frontLinesEnabled;
+      checkbox.addEventListener("change", () => {
+        frontLinesEnabled = checkbox.checked;
+        refreshFrontLines();
+      });
+    }
+
+    function buildModelToggles() {
+      const container = document.getElementById("model-toggles");
+      container.innerHTML = "";
+      for (const [key, info] of Object.entries(MODELS)) {
+        const row = document.createElement("label");
+        row.className = "class-row";
+        row.innerHTML = `<input type="checkbox" data-model="${key}" ${selectedModels.has(key) ? "checked" : ""} /> ${info.label}`;
+        row.querySelector("input").addEventListener("change", (e) => onModelToggle(key, e.target.checked));
+        container.appendChild(row);
+      }
+    }
+
+    // ZarrLayer calls `new URL(source)` internally with no base argument,
+    // which throws ("Failed to construct 'URL': Invalid URL") for a
+    // root-relative path like "/data/theta-e_uv_q/....zarr" -- confirmed
+    // live, 2026-08-21: latest.json fetched fine (fetch() tolerates
+    // relative paths against the document base) but all four layers
+    // silently failed `onLoadingStateChange`/console-errored out during
+    // construction, so nothing ever painted despite the panel showing a
+    // real cycle time. `new URL(path, window.location.origin)` resolves it
+    // to an absolute URL first.
+    function absoluteStorePath(model, storeName) {
+      return new URL(`${ZARR_ROOT}/${model}/${storeName}`, window.location.origin).toString();
+    }
+
+    async function resolveLatestRun(model) {
+      // Each model directory publishes a small latest.json pointer file
+      // (written by scheduler/run_cycle.py after each successful cycle) so
+      // the frontend never has to guess the most recent IFS cycle's store
+      // names. Shape as of 2026-08-21 (multi-step forecast product, every
+      // 6h out to 240h -- 90h for 06Z/18Z cycles, see
+      // ecmwf_ifs.target_steps_for_cycle):
+      //   {"cycle_time": "...", "steps": [{"step_hours", "valid_time", "store"}, ...]}
+      // 2026-11-16 (startup-latency pass): the head's inline script already
+      // started this exact request at HTML-parse time (see
+      // window.__latestRunPromise) -- consume that response on the first
+      // call instead of re-fetching, then drop it so the later poll
+      // (startPollingForNewSteps) and any model re-load always do a fresh
+      // no-store fetch of the moving pointer.
+      let payload;
+      const early = window.__latestRunPromise;
+      if (early && early.model === model) {
+        delete window.__latestRunPromise;
+        payload = await early.promise;
+      } else {
+        const res = await fetch(MODELS[model].latestPointer, { cache: "no-store" });
+        if (!res.ok) throw new Error(`no published run for ${model} (HTTP ${res.status})`);
+        payload = await res.json();
+      }
+      const { cycle_time, steps, expected_steps } = payload;
+      if (!Array.isArray(steps) || steps.length === 0) {
+        throw new Error(`latest.json for ${model} has no published steps`);
+      }
+      return {
+        cycleTime: cycle_time,
+        steps,
+        expectedSteps: Array.isArray(expected_steps) ? expected_steps : fallbackExpectedSteps(cycle_time),
+      };
+    }
+
+    // Lead hours a cycle targets, mirroring ecmwf_ifs.target_steps_for_cycle
+    // (6-hourly to 240h for 00Z/12Z, to 144h for 06Z/18Z). Only a fallback
+    // for latest.json files written before the scheduler started including
+    // "expected_steps".
+    function fallbackExpectedSteps(cycleTime) {
+      const hour = new Date(cycleTime + "Z").getUTCHours();
+      const max = hour === 0 || hour === 12 ? 240 : 144;
+      return Array.from({ length: max / 6 + 1 }, (_, i) => i * 6);
+    }
+
+    // Draws one tick per expected forecast step under the slider: light if
+    // that step is published, red if not yet. Clicking a published tick
+    // jumps the slider/map to it; the visible step's tick is highlighted.
+    // The slider runs over "slots" -- one per expected forecast hour,
+    // published or not -- so its thumb sits exactly over a tick. These
+    // helpers translate between slots and indexes into activeSteps (the
+    // published steps, which is what the rest of the app works in).
+    function stepSlotHours(state) {
+      const published = state.activeSteps.map((s) => s.step_hours);
+      return [...new Set([...(state.expectedSteps || []), ...published])].sort((a, b) => a - b);
+    }
+
+    function slotOfIndex(state, index) {
+      const step = state.activeSteps[index];
+      return step ? stepSlotHours(state).indexOf(step.step_hours) : 0;
+    }
+
+    // Snaps `slot` to a published one: a single-slot move (arrow key) goes
+    // on to the next published slot in that direction so keyboard stepping
+    // can't get stuck against a gap; bigger jumps (dragging) take the
+    // nearest. Returns an index into activeSteps.
+    function indexOfSlot(state, slot, prevSlot) {
+      const hours = stepSlotHours(state);
+      const published = state.activeSteps.map((s, i) => [hours.indexOf(s.step_hours), i]);
+      const dir = Math.abs(slot - prevSlot) === 1 ? Math.sign(slot - prevSlot) : 0;
+      let pool = dir ? published.filter(([sl]) => (sl - slot) * dir >= 0) : [];
+      if (!pool.length) pool = published;
+      return pool.reduce((best, cur) => (Math.abs(cur[0] - slot) < Math.abs(best[0] - slot) ? cur : best))[1];
+    }
+
+    function setSliderSlot(slot) {
+      const slider = document.getElementById("time-slider");
+      slider.value = String(slot);
+      slider.dataset.slot = String(slot);
+    }
+
+    function renderStepTicks(state, currentIndex = state.visibleStepIndex) {
+      const box = document.getElementById("time-ticks");
+      const published = new Map(state.activeSteps.map((s, i) => [s.step_hours, i]));
+      const expected = stepSlotHours(state);
+      const span = Math.max(expected.length - 1, 1);
+      box.replaceChildren(...expected.map((hours, i) => {
+        const idx = published.get(hours);
+        const tick = document.createElement("button");
+        tick.type = "button";
+        tick.className = "step-tick";
+        tick.style.left = `calc(8px + (100% - 16px) * ${i / span})`;
+        if (idx === undefined) {
+          tick.classList.add("is-missing");
+          tick.disabled = true;
+          tick.title = `T+${hours}h: not published yet`;
+        } else {
+          if (idx === currentIndex) tick.classList.add("is-current");
+          tick.title = `T+${hours}h: published`;
+          tick.onclick = () => {
+            const slider = document.getElementById("time-slider");
+            slider.value = String(i);
+            slider.dispatchEvent(new Event("input", { bubbles: true }));
+            slider.dispatchEvent(new Event("change", { bubbles: true }));
+          };
+        }
+        return tick;
+      }));
+    }
+
+    // Removes every cached layer for every step of `state`'s model, and
+    // forgets the cache -- only needed when the underlying data source
+    // changes out from under it (a re-load of the same model, e.g. a fresh
+    // cycle), since otherwise a "cold" step's old zarr store path would stay
+    // resident under a new cache entry. Not called by showStep()/the slider
+    // anymore -- see the 2026-08-21 comment on `layersByStep` above for why
+    // moving between already-built steps no longer removes anything.
+    function clearAllCachedLayers(state) {
+      for (const [index, stepLayers] of state.layersByStep) {
+        for (const cls of stepLayers.keys()) {
+          const id = `fronts-${state.key}-${cls}-${index}`;
+          if (map.getLayer(id)) map.removeLayer(id);
+        }
+      }
+      state.layersByStep.clear();
+      state.stepLoadState.clear();
+      state.currentStepIndex = -1;
+      state.visibleStepIndex = -1;
+      state.buildingIndex = -1;
+      state.pendingIndex = null;
+      hideClickTooltip(); // last reading belongs to a step/model that's gone
+    }
+
+    const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    // `isoString` is a naive "YYYY-MM-DDTHH:MM:SS" string in UTC (see
+    // run_cycle.py's _valid_time/_cycle_time) -- appending "Z" makes Date
+    // parse it as UTC instead of local time.
+    function formatHumanUTC(isoString) {
+      const d = new Date(`${isoString}Z`);
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      const hour = String(d.getUTCHours()).padStart(2, "0");
+      return `${d.getUTCFullYear()} ${MONTH_ABBR[d.getUTCMonth()]} ${day} ${hour}Z`;
+    }
+
+    function formatForecastHour(h) {
+      return String(h).padStart(3, "0");
+    }
+
+    // Updates just the text readout, with no layer work -- cheap enough to
+    // call on every single slider `input` tick so the displayed time keeps
+    // up with the thumb even while the actual step change is debounced (see
+    // pendingShowStepTimer below).
+    function previewStepLabel(index) {
+      const step = modelStates.get(primaryModel).activeSteps[index];
+      if (!step) return;
+      document.getElementById("time-valid").textContent = formatHumanUTC(step.valid_time);
+      document.getElementById("time-lead").textContent = formatForecastHour(step.step_hours);
+    }
+
+    // Builds one step's 4 class ZarrLayers for `modelState`'s model and
+    // caches them under `index`. Only called for steps not already in
+    // `modelState.layersByStep` -- see requestStepBuild for the gate that
+    // keeps at most one of these in flight at a time PER MODEL. The real
+    // reveal/swap is still deferred until this step's data has actually
+    // settled (see revealStep(), called from onStepFullyLoaded) -- but see
+    // the warm-up note below for why these layers can't just start fully
+    // hidden in the meantime.
+    function buildStepLayers(modelState, index) {
+      const step = modelState.activeSteps[index];
+      const storePath = absoluteStorePath(modelState.key, step.store);
+      const stepLayers = new Map();
+      const pendingClasses = new Set(Object.keys(CLASS_STYLE));
+      modelState.stepLoadState.set(index, { pendingClasses, loaded: false, error: null, settleTimers: new Map() });
+      for (const [cls, style] of Object.entries(CLASS_STYLE)) {
+        const layer = new ZarrLayer({
+          id: `fronts-${modelState.key}-${cls}-${index}`,
+          source: storePath,
+          variable: cls,
+          zarrVersion: ZARR_VERSION,
+          bounds: GRID_BOUNDS,
+          latIsAscending: GRID_LAT_ASCENDING,
+          // 2026-11-16 (uint8 stores): the quantized stores carry missing
+          // data as CF _FillValue 255 (NaN sentinel), but the zarr array's
+          // own fill_value is 0, and for non-float dtypes @carbonplan/
+          // zarr-layer falls back to that array fill_value as its "missing"
+          // marker -- it never reads the _FillValue attribute (confirmed
+          // against the esm.sh 0.12.1 source's fill/transform plumbing).
+          // Without pinning it here, every quantized-zero background cell
+          // decoded as missing (tooltip rows vanished vs the float32
+          // stores), and a 255 sentinel decoded as 255/254 ~= 1.004,
+          // rendering as a saturated full-opacity blob and querying as
+          // "100%". 255 can never equal a real float32 probability in
+          // [0,1], so this is inert on the float32 stores production still
+          // serves while the pipeline rolls over.
+          fillValue: 255,
+          clim: [0, 1],
+          // Two identical stops: customFrag (below) is what actually
+          // varies alpha by probability, so the colormap texture itself
+          // just needs to resolve to this class's solid color at every
+          // x-coordinate it's sampled at. `opacity` is fixed and never
+          // toggled -- `visibility` (via setStepVisibility) is what
+          // actually shows/hides this layer.
+          colormap: [style.color, style.color],
+          customFrag: customClassFrag(cls),
+          opacity: 0.85,
+          // Fires on every loading-state change -- at least an initial
+          // metadata-phase true/false pair, plus (for slow enough chunk
+          // fetches) a later chunks true/false pair, plus any further
+          // firing from panning in new chunks. The `info.loaded` guard
+          // means only the first SETTLE_MS-quiet "done loading" ever
+          // advances the build queue / triggers prefetch; later firings
+          // are no-ops for that purpose.
+          //
+          // 2026-08-23 fix (play button advancing before pixels arrive /
+          // marching through missing data) -- see the big SETTLE_MS
+          // comment above for why a raw loading:false can't be trusted on
+          // its own. Also captures `loadEvent.error` (set when e.g. a
+          // step's zarr store 404s -- metadata fails fast, which used to
+          // look identical to a fast successful load) so onStepFullyLoaded
+          // / advancePlayback can stop playback on a step that never
+          // actually loaded instead of treating the failure as "done".
+          onLoadingStateChange: (loadEvent) => {
+            const info = modelState.stepLoadState.get(index);
+            if (!info || info.loaded) return;
+            // Steps published before 2026-10-02 have no dryline field, so a
+            // dryline load error is expected there and must not flag the step.
+            if (loadEvent.error && !info.error && !OPTIONAL_CLASSES.has(cls)) info.error = String(loadEvent.error);
+            const pending = info.settleTimers.get(cls);
+            if (pending !== undefined) clearTimeout(pending);
+            if (loadEvent.loading) {
+              info.settleTimers.delete(cls);
+              return;
+            }
+            info.settleTimers.set(
+              cls,
+              setTimeout(() => {
+                info.settleTimers.delete(cls);
+                // Guards against this timer outliving its step (evicted
+                // from stepLoadState, or superseded by a fresh build for
+                // the same index) -- `!==` catches both since eviction
+                // deletes the entry and a rebuild sets a brand-new object.
+                if (modelState.stepLoadState.get(index) !== info || info.loaded) return;
+                info.pendingClasses.delete(cls);
+                if (info.pendingClasses.size === 0) {
+                  info.loaded = true;
+                  onStepFullyLoaded(modelState, index);
+                }
+              }, SETTLE_MS)
+            );
+          },
+        });
+        map.addLayer(layer);
+        raiseFrontLines(); // keep the optional front lines above the newly added raster layer
+        stepLayers.set(cls, layer);
+      }
+      modelState.layersByStep.set(index, stepLayers);
+      // NOT setStepVisibility(modelState, index, false) -- confirmed against
+      // the library source (see the big comment on
+      // revealStep()/setStepVisibility above): a `visibility: none` custom
+      // layer's prerender()/render() are never invoked by MapLibre, and
+      // prerender() is the only place ZarrLayer calls
+      // regionRenderer.update(), which is what actually starts fetching
+      // chunk data. A brand-new step hidden immediately like that can never
+      // fetch anything, which means it can never reach
+      // stepLoadState.loaded, which is the only thing that would ever make
+      // revealStep() show it -- a permanent deadlock. Confirmed live
+      // 2026-08-28: steps built via the slider sat on just their initial
+      // zarr.json metadata fetch forever, no chunk requests ever following,
+      // until manually panning/zooming the map forced enough incidental
+      // repaints to kick them loose.
+      //
+      // Fix: warm up visible-but-transparent instead (same trick
+      // revealStep() already uses for a loaded-but-not-yet-shown step),
+      // so MapLibre keeps calling prerender() every frame and the fetch
+      // actually starts. onStepFullyLoaded() hides it again once it settles,
+      // unless it's what showStep() currently wants on screen, in which
+      // case revealStep() takes over the swap as before.
+      for (const [cls, layer] of stepLayers) {
+        const id = `fronts-${modelState.key}-${cls}-${index}`;
+        if (!map.getLayer(id)) continue;
+        map.setLayoutProperty(id, "visibility", classVisible.get(cls) ? "visible" : "none");
+        layer.setOpacity(0);
+      }
+      map.triggerRepaint();
+      evictOldCachedStepsIfNeeded(modelState);
+    }
+
+    // Gate for buildStepLayers: if nothing else is building, start right
+    // away; otherwise remember `index` as the one to build next once the
+    // in-flight build finishes (overwriting any earlier-queued target --
+    // see the big comment on `buildingIndex`/`pendingIndex` above).
+    function requestStepBuild(modelState, index) {
+      if (modelState.layersByStep.has(index)) return; // already built or already the in-flight build
+      if (modelState.buildingIndex !== -1) {
+        modelState.pendingIndex = index;
+        return;
+      }
+      modelState.buildingIndex = index;
+      buildStepLayers(modelState, index);
+    }
+
+    // Called once a step's 4 layers have all finished their initial load.
+    // Advances to whatever step was requested in the meantime, or -- if the
+    // user has settled -- opportunistically prefetches a neighboring step.
+    function onStepFullyLoaded(modelState, index) {
+      if (modelState.buildingIndex === index) modelState.buildingIndex = -1;
+      // Only swap what's on screen if `index` is still what's actually
+      // wanted -- a build that resolves after the user/playback already
+      // moved on (this is a stale/prefetch completion) must stay hidden.
+      // Reveals even on a load error (info.error) since that's this
+      // step's terminal state either way -- refreshMeta below is what
+      // surfaces "no data for this step" once it's showing.
+      if (index === modelState.currentStepIndex) {
+        revealStep(modelState, index);
+      } else {
+        // A background prefetch/autoload build settled while the user was
+        // looking at a different step -- go back to fully hidden now that
+        // regionRenderer has actually caught up, rather than leaving it at
+        // the buildStepLayers() warm-up's visible-but-opacity-0 state
+        // (still a full render pass every frame -- see the 2026-08-21
+        // opacity-vs-visibility comment above for why that's costly).
+        setStepVisibility(modelState, index, false);
+      }
+      refreshMeta();
+      if (modelState.pendingIndex !== null && modelState.pendingIndex !== index) {
+        const next = modelState.pendingIndex;
+        modelState.pendingIndex = null;
+        requestStepBuild(modelState, next);
+      } else {
+        modelState.pendingIndex = null;
+        // Auto-load supersedes the neighbor-only prefetch below -- it's a
+        // superset (eventually covers the same neighbors, then keeps going)
+        // -- so there's no reason to run both.
+        if (autoLoadEnabled) scheduleAutoLoad(modelState);
+        else schedulePrefetchNeighbors(modelState, modelState.currentStepIndex);
+      }
+      // Playback is driven off the PRIMARY model only (see advancePlayback)
+      // -- it was waiting on this exact step to finish building before it
+      // could schedule the next frame -- resume now that it's actually on
+      // screen. `index === modelState.currentStepIndex` excludes
+      // prefetch-neighbor completions, which aren't what's currently
+      // displayed. A step that failed to load (see the onLoadingStateChange
+      // comment above) stops playback here instead of arming the next frame
+      // -- otherwise this is exactly the path that let playback march
+      // straight through missing data. A secondary model reaching here
+      // never touches playback -- it shouldn't stall or pace the shared
+      // timeline just because it personally lagged.
+      if (modelState.key === primaryModel && isPlaying && index === modelState.currentStepIndex && playTimer === null) {
+        const info = modelState.stepLoadState.get(index);
+        if (info?.error) {
+          stopPlayback();
+        } else {
+          playTimer = setTimeout(advancePlayback, PLAY_INTERVAL_MS);
+        }
+      }
+    }
+
+    // Prefetches one not-yet-cached neighbor of `index` (hidden) once the
+    // browser is idle, so nudging the slider one step in either direction
+    // -- the overwhelmingly common interaction once a session has warmed
+    // up -- is instant instead of triggering a fresh fetch. Only runs when
+    // nothing else is queued/building, so it never competes with real
+    // navigation, and only ever prefetches one step per idle callback (the
+    // other neighbor gets its turn the next time this fires, chained via
+    // onStepFullyLoaded's else-branch).
+    function schedulePrefetchNeighbors(modelState, index) {
+      requestIdle(() => {
+        if (modelState.buildingIndex !== -1 || modelState.pendingIndex !== null) return;
+        if (modelState.currentStepIndex !== index) return; // stale -- slider moved on
+        for (const neighbor of [index + 1, index - 1]) {
+          if (neighbor < 0 || neighbor >= modelState.activeSteps.length) continue;
+          if (modelState.layersByStep.has(neighbor)) continue;
+          requestStepBuild(modelState, neighbor);
+          return;
+        }
+      });
+    }
+
+    // 2026-08-26, per Taylor's request: opt-in background fetch of every
+    // step in the current cycle, so the whole run is ready to scrub/play
+    // through instantly without the user ever pressing play or touching the
+    // slider first. Off by default -- unlike schedulePrefetchNeighbors
+    // (always on, but only ever a step or two ahead), this walks the
+    // *entire* run, which for a 240h cycle means ~40 steps' worth of zarr
+    // fetches and live GL layers; only worth paying that cost when the user
+    // actually asks for it via the checkbox (see setupAutoLoadToggle).
+    let autoLoadEnabled = false;
+
+    // Builds the lowest-indexed not-yet-built step, one at a time, chained
+    // via onStepFullyLoaded's else-branch the same way schedulePrefetchNeighbors
+    // is -- each call only ever kicks off a single build so it always
+    // defers to real navigation (requestStepBuild's buildingIndex/
+    // pendingIndex gate still applies), it just never stops asking once a
+    // build completes and nothing else is queued.
+    function scheduleAutoLoad(modelState) {
+      if (!autoLoadEnabled) return;
+      requestIdle(() => {
+        if (!autoLoadEnabled) return;
+        if (modelState.buildingIndex !== -1 || modelState.pendingIndex !== null) return;
+        for (let i = 0; i < modelState.activeSteps.length; i++) {
+          if (modelState.layersByStep.has(i)) continue;
+          requestStepBuild(modelState, i);
+          return;
+        }
+      });
+    }
+
+    function setupAutoLoadToggle() {
+      const checkbox = document.getElementById("autoload-checkbox");
+      checkbox.checked = autoLoadEnabled;
+      checkbox.onchange = () => {
+        autoLoadEnabled = checkbox.checked;
+        if (autoLoadEnabled) {
+          for (const key of selectedModels) scheduleAutoLoad(modelStates.get(key));
+        }
+      };
+    }
+
+    // 2026-08-26: used to also append " · loading…" while the current step
+    // was mid-build -- dropped per Taylor's request. That suffix popped in
+    // and out on essentially every autoplay step (a step is "loading" for
+    // most of its ~1s build window -- see revealStep's settle wait), and
+    // #panel sizes to its content, so the whole card's width jittered in
+    // sync with the flicker this fix's `revealStep` change was specifically
+    // trying to get rid of. The error suffix stays: it's rare/persistent,
+    // not a per-step toggle, so it doesn't cause the same jitter.
+    //
+    // 2026-09-17: now summarizes every SELECTED model, not just one -- each
+    // gets its own "label · cycle ..." segment (or "loading…"/its
+    // loadError), joined so a viewer showing two models can tell them apart
+    // and see which one, if either, is missing this exact step.
+    function refreshMeta() {
+      const parts = [];
+      let anyError = false;
+      for (const key of selectedModels) {
+        const state = modelStates.get(key);
+        if (state.loadError) {
+          parts.push(`${MODELS[key].label}: ${state.loadError}`);
+          anyError = true;
+          continue;
+        }
+        if (state.activeCycleTime == null) {
+          parts.push(`${MODELS[key].label}: loading…`);
+          continue;
+        }
+        const stepError = state.stepLoadState.get(state.currentStepIndex)?.error;
+        const noStepAtThisTime = state.currentStepIndex === -1;
+        const suffix = stepError || noStepAtThisTime ? " · no data for this step" : "";
+        if (stepError || noStepAtThisTime) anyError = true;
+        parts.push(`${MODELS[key].label} · cycle ${state.activeCycleTime}${suffix}`);
+      }
+      setMeta(parts.join("   |   ") || "no model selected", anyError);
+    }
+
+    // Shows `index` of `modelState`'s OWN activeSteps -- for the primary
+    // model this index comes directly off the shared slider; for a
+    // secondary model it's already been translated to match the primary's
+    // current step_hours (see globalShowStep) before this is called.
+    function showStep(modelState, index) {
+      const step = modelState.activeSteps[index];
+      if (!step) {
+        // No data for this exact step -- e.g. a secondary model whose cycle
+        // is missing a step the primary has. Hide whatever this model was
+        // showing rather than leave a stale frame up, and leave
+        // currentStepIndex at -1 so eviction/playback never treat this as
+        // "the step we're waiting on".
+        if (modelState.visibleStepIndex !== -1) setStepVisibility(modelState, modelState.visibleStepIndex, false);
+        modelState.currentStepIndex = -1;
+        refreshMeta();
+        return;
+      }
+
+      modelState.currentStepIndex = index;
+
+      const stepLayers = modelState.layersByStep.get(index);
+      const loadState = modelState.stepLoadState.get(index);
+      if (stepLayers && loadState?.loaded) {
+        // True cache hit -- this step's data already settled at some
+        // earlier point, so it's safe to swap on-screen visibility right
+        // now with no flash risk. Re-insert to move this step to the MRU
+        // end of layersByStep's iteration order (see
+        // evictOldCachedStepsIfNeeded).
+        modelState.layersByStep.delete(index);
+        modelState.layersByStep.set(index, stepLayers);
+        revealStep(modelState, index);
+      } else if (!stepLayers) {
+        // Not built yet -- request a (possibly queued) build; see
+        // requestStepBuild for why this doesn't just build inline.
+        // Whatever's currently visible stays put -- see revealStep(),
+        // called from onStepFullyLoaded -- until this step's data actually
+        // arrives, so the map never goes blank in the meantime.
+        requestStepBuild(modelState, index);
+      }
+      // else: layers exist but haven't settled yet (a build already in
+      // flight for this exact index) -- nothing to do here either; stay on
+      // whatever's visible and let onStepFullyLoaded reveal it once ready.
+
+      // Deliberately NOT updating time-valid/time-lead/the slider position
+      // here -- that happens in revealStep(), gated on the frame actually
+      // being on screen, so the label never gets ahead of what's rendered
+      // (see the comment there). Manual slider dragging still gets instant
+      // label feedback, but via previewStepLabel in setupTimeSlider, not
+      // this function.
+      refreshMeta();
+    }
+
+    // The one entry point the shared slider/play button/model-toggles call:
+    // moves the PRIMARY model to `index` (into its own activeSteps, exactly
+    // like the single-model version of this used to work), then asks every
+    // other SELECTED model to show whichever of its own steps has the same
+    // step_hours -- or hides it if that model has no such step. See the
+    // multi-model design note above makeModelState for why step_hours
+    // (not raw index) is the thing translated across models.
+    function globalShowStep(index) {
+      const primaryState = modelStates.get(primaryModel);
+      showStep(primaryState, index);
+      const targetHours = primaryState.activeSteps[index]?.step_hours;
+      for (const key of selectedModels) {
+        if (key === primaryModel) continue;
+        const state = modelStates.get(key);
+        if (state.activeSteps.length === 0) continue; // not loaded (yet, or failed) -- nothing to show
+        const idx = targetHours == null ? -1 : state.activeSteps.findIndex((s) => s.step_hours === targetHours);
+        showStep(state, idx);
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Play/pause animation through activeSteps, per Taylor's reference
+    // (https://madewithmaplibre.com/products/yr-no/).
+    //
+    // Advances are gated on the target step actually being on screen, not
+    // just a fixed wall-clock cadence -- advancePlayback() only arms the
+    // next PLAY_INTERVAL_MS timer immediately when the step it just
+    // showStep()'d to was already cached (layersByStep hit). If it wasn't
+    // (a fresh build was kicked off, or it got queued behind one already
+    // in flight -- see requestStepBuild/buildingIndex/pendingIndex above),
+    // no timer is armed here; onStepFullyLoaded resumes playback itself
+    // once that exact step's layers finish loading. So a slow/throttled
+    // fetch pauses the animation on the last fully-loaded frame instead of
+    // advancing over a half-loaded or still-previous frame.
+    // -----------------------------------------------------------------
+    let isPlaying = false;
+    let playTimer = null; // a setTimeout id -- see advancePlayback/onStepFullyLoaded
+    const PLAY_INTERVAL_MS = 700;
+
+    function stopPlayback() {
+      if (playTimer !== null) {
+        clearTimeout(playTimer);
+        playTimer = null;
+      }
+      isPlaying = false;
+      const btn = document.getElementById("play-button");
+      btn.innerHTML = "&#9654;";
+      btn.setAttribute("aria-label", "Play");
+    }
+
+    // Playback is driven entirely off the PRIMARY model's own activeSteps --
+    // see globalShowStep for how every other selected model gets kept in
+    // sync with whatever step that lands on.
+    function advancePlayback() {
+      playTimer = null;
+      if (!isPlaying) return;
+      const primaryState = modelStates.get(primaryModel);
+      const next = (primaryState.currentStepIndex + 1) % primaryState.activeSteps.length;
+      // NB: the slider position and time label are intentionally NOT
+      // updated here -- that used to happen eagerly, right before the
+      // frame it describes had actually loaded, so the displayed time
+      // raced ahead of what was on screen during autoplay. showStep()/
+      // revealStep() now move both, gated on the frame actually being
+      // shown.
+      globalShowStep(next);
+      // NB: layersByStep.has(next) is NOT "next has finished loading" --
+      // buildStepLayers() inserts into layersByStep synchronously the
+      // moment a build *starts* (so the GL layer objects exist immediately
+      // for eviction/visibility bookkeeping), well before its chunks have
+      // actually arrived. stepLoadState is the one that only flips to
+      // `loaded: true` once every class's onLoadingStateChange has fired
+      // with loading:false -- that's the real "is this frame actually on
+      // screen yet" signal.
+      const nextState = primaryState.stepLoadState.get(next);
+      if (nextState?.loaded) {
+        // Already fully loaded (cache hit) -- showStep() displayed it
+        // synchronously, so pace the next frame normally... unless that
+        // "load" was actually a cached failure (revisiting a step whose
+        // data doesn't exist, see the onLoadingStateChange comment above)
+        // -- then stop rather than looping straight through it again.
+        // Otherwise leave playTimer null; onStepFullyLoaded(next) arms it
+        // once the step that's actually now on screen finishes loading.
+        if (nextState.error) {
+          stopPlayback();
+        } else {
+          playTimer = setTimeout(advancePlayback, PLAY_INTERVAL_MS);
+        }
+      }
+    }
+
+    function startPlayback() {
+      if (modelStates.get(primaryModel).activeSteps.length <= 1) return;
+      isPlaying = true;
+      const btn = document.getElementById("play-button");
+      btn.innerHTML = "&#10074;&#10074;";
+      btn.setAttribute("aria-label", "Pause");
+      advancePlayback();
+    }
+
+    function setupPlayButton() {
+      const btn = document.getElementById("play-button");
+      // Reassigned (not addEventListener) for the same reason as the
+      // slider's oninput/onchange below -- loadModelData() can run more
+      // than once per page life.
+      btn.onclick = () => {
+        if (isPlaying) stopPlayback();
+        else startPlayback();
+      };
+    }
+
+    function updateMaxLeadLabel() {
+      const steps = modelStates.get(primaryModel).activeSteps;
+      const maxStepHours = steps[steps.length - 1].step_hours;
+      document.getElementById("time-max-lead").textContent = `max T+${maxStepHours}h`;
+    }
+
+    // 2026-08-30, per Taylor: activeSteps used to be fetched exactly once,
+    // when the page first loaded (see resolveLatestRun's call site in
+    // loadModel) -- so a page left open while a 06Z/18Z cycle worked its
+    // way toward its full 144h/25-step target (240h/41 steps for 00Z/12Z)
+    // kept showing whatever smaller max lead time was published at load
+    // time, even as the scheduler kept appending real steps to latest.json
+    // on disk for hours afterward. Poll periodically and silently extend
+    // the slider/label as more of the SAME cycle's steps land -- never
+    // shrinks, never resets slider.value, never touches whatever step is
+    // currently on screen. A genuinely new cycle (different cycle_time) is
+    // deliberately left alone here and picked up on the next page load,
+    // not auto-switched into out from under the user.
+    const POLL_NEW_STEPS_MS = 60000;
+    let pollNewStepsTimer = null;
+
+    // One poll timer per model (all models that have ever been loaded are
+    // polled, regardless of current checkbox state, so re-checking a
+    // briefly-unchecked model gets its freshest steps for free) -- only the
+    // PRIMARY model's poll result is allowed to touch the shared
+    // slider/label DOM.
+    function startPollingForNewSteps(modelState) {
+      if (modelState.pollTimer !== null) clearInterval(modelState.pollTimer);
+      modelState.pollTimer = setInterval(async () => {
+        let result;
+        try {
+          result = await resolveLatestRun(modelState.key);
+        } catch {
+          return; // transient fetch/parse failure -- just try again next tick
+        }
+        if (result.cycleTime !== modelState.activeCycleTime) return; // new cycle -- next reload picks it up
+        if (result.steps.length <= modelState.activeSteps.length) return; // nothing new yet
+        modelState.activeSteps = result.steps;
+        modelState.expectedSteps = result.expectedSteps;
+        if (modelState.key !== primaryModel) return; // steps updated; no shared UI to touch
+        if (document.getElementById("time-slider").disabled) {
+          // This cycle just went from "only step 0 published" to having a
+          // real range -- safe to run full setup (which resets slider.value
+          // to 0) since step 0 is the only thing that's ever been on screen.
+          setupTimeSlider();
+        } else {
+          document.getElementById("time-slider").max = String(stepSlotHours(modelState).length - 1);
+          setSliderSlot(slotOfIndex(modelState, Math.max(modelState.visibleStepIndex, 0)));
+          updateMaxLeadLabel();
+          renderStepTicks(modelState);
+        }
+        refreshFrontLines(); // the on-screen step's entry may have gained a fronts file
+      }, POLL_NEW_STEPS_MS);
+    }
+
+    function setupTimeSlider() {
+      const primaryState = modelStates.get(primaryModel);
+      const control = document.getElementById("time-control");
+      const slider = document.getElementById("time-slider");
+      const playButton = document.getElementById("play-button");
+      control.style.display = "block";
+      renderStepTicks(primaryState, 0);
+      if (primaryState.activeSteps.length <= 1) {
+        // Nothing to slide over yet (e.g. a cycle that's only gotten
+        // through one step so far) -- keep the control visible so the tick
+        // strip shows which steps are still missing, but disable the
+        // slider and play button since they can't move.
+        slider.disabled = true;
+        playButton.disabled = true;
+        slider.max = String(stepSlotHours(primaryState).length - 1);
+        setSliderSlot(slotOfIndex(primaryState, 0));
+        updateMaxLeadLabel();
+        return;
+      }
+      slider.disabled = false;
+      playButton.disabled = false;
+      slider.max = String(stepSlotHours(primaryState).length - 1);
+      setSliderSlot(slotOfIndex(primaryState, 0));
+      updateMaxLeadLabel();
+      // Reassigning oninput (rather than addEventListener, which would
+      // stack a new listener every model load) since loadModelData() can
+      // run more than once per page life.
+      //
+      // 2026-08-22: debounced, because oninput fires continuously while
+      // dragging -- with every tick calling showStep() directly, scrubbing
+      // quickly across many never-before-seen steps built 4 brand-new
+      // ZarrLayers (and their real zarr-chunk fetches) per tick, far faster
+      // than they could load. The browser's per-origin connection cap then
+      // queued most of those fetches behind each other, and
+      // evictOldCachedStepsIfNeeded (see layersByStep above) was removing
+      // the oldest steps' layers before their in-flight fetches ever
+      // resolved -- so the connection pool stayed clogged with requests for
+      // steps already scrolled past, and the step the slider actually
+      // settled on never got its turn. Confirmed live: fast scrubbing made
+      // earlier steps' data vanish (expected -- that's the cache evicting)
+      // and then loading stall entirely, not just look laggy.
+      //
+      // The label still updates on every tick via previewStepLabel (cheap,
+      // no network) so the slider feels responsive; only the expensive
+      // layer-build/fetch path in showStep is delayed until the thumb has
+      // been still for SHOW_STEP_DEBOUNCE_MS.
+      slider.oninput = (e) => {
+        if (isPlaying) stopPlayback(); // manual scrub takes over from autoplay
+        const index = snapSliderToPublished(e.target);
+        previewStepLabel(index);
+        if (pendingShowStepTimer !== null) clearTimeout(pendingShowStepTimer);
+        pendingShowStepTimer = setTimeout(() => {
+          pendingShowStepTimer = null;
+          globalShowStep(index);
+        }, SHOW_STEP_DEBOUNCE_MS);
+      };
+      // `change` fires once the user releases the thumb (or commits via
+      // keyboard) -- flush the pending debounce immediately at that point
+      // rather than making them wait out the remaining
+      // SHOW_STEP_DEBOUNCE_MS after they've already stopped moving it.
+      // `showStep` itself is idempotent/cheap on a cache hit and safely
+      // queued on a miss (see requestStepBuild), so calling it here even
+      // when the debounce already fired first is harmless.
+      slider.onchange = (e) => {
+        if (pendingShowStepTimer !== null) {
+          clearTimeout(pendingShowStepTimer);
+          pendingShowStepTimer = null;
+        }
+        globalShowStep(snapSliderToPublished(e.target));
+      };
+    }
+
+    // Reads the slider's slot, snaps it to a published step (moving the
+    // thumb if it landed on a gap), and returns that step's index.
+    function snapSliderToPublished(slider) {
+      const state = modelStates.get(primaryModel);
+      const index = indexOfSlot(state, Number(slider.value), Number(slider.dataset.slot ?? 0));
+      setSliderSlot(slotOfIndex(state, index));
+      return index;
+    }
+
+    // Works around a confirmed @carbonplan/zarr-layer bug (upstream, not
+    // ours -- reported 2026-08-27): under MapLibre's globe projection, its
+    // visible-region computation silently returns zero regions -- no data
+    // ever fetched, not just "slow" -- whenever the map container's CSS
+    // width is below roughly 800px, independent of zoom or device pixel
+    // ratio. That covers effectively every phone in portrait mode.
+    // Confirmed live that forcing the container wider than that threshold,
+    // calling resize(), and then shrinking back (also with a resize())
+    // reliably unsticks it -- the data fetched while briefly wide persists
+    // and renders fine once cropped back down. No known clean fix from our
+    // side short of patching the library, so this brute-forces the same
+    // effect. #map is hidden (opacity 0) for the ~2.2s round-trip so the
+    // forced-wide layout is never visible to the user; a fixed delay
+    // (rather than watching for the fetch to actually complete) keeps this
+    // self-contained -- see stepLoadState for the "real" load-settle
+    // tracking this deliberately doesn't hook into.
+    function unstickNarrowViewportDataLoad() {
+      const container = map.getContainer();
+      const SAFE_WIDTH_PX = 820; // observed failure cutoff ~745-800px; margin above it
+      const WORKAROUND_WIDTH_PX = 900;
+      const HOLD_MS = 2200;
+      if (container.clientWidth >= SAFE_WIDTH_PX) return;
+      container.classList.add("resize-workaround");
+      container.style.right = "auto";
+      container.style.width = `${WORKAROUND_WIDTH_PX}px`;
+      map.resize();
+      setTimeout(() => {
+        container.style.width = "";
+        container.style.right = "";
+        map.resize();
+        container.classList.remove("resize-workaround");
+      }, HOLD_MS);
+    }
+
+    // Fetches `model`'s latest.json for the first time (or re-fetches after
+    // its cache was cleared) and gets it showing something. Two cases:
+    //   - `model` is the primary (either the only selected model, or just
+    //     promoted into that role -- see onModelToggle) -- does the full
+    //     single-model setup this always did: reset the shared slider to
+    //     T+0 and go from there.
+    //   - `model` is a secondary model being newly checked on -- jumps
+    //     straight to whatever step_hours the primary is currently showing
+    //     instead of resetting the shared timeline back to T+0, so turning
+    //     a second model on mid-session doesn't yank the view back to the
+    //     start of the cycle.
+    async function loadModelData(model) {
+      const state = modelStates.get(model);
+      clearAllCachedLayers(state);
+      state.loadError = null;
+      if (model === primaryModel) {
+        stopPlayback();
+        if (pendingShowStepTimer !== null) {
+          clearTimeout(pendingShowStepTimer);
+          pendingShowStepTimer = null;
+        }
+      }
+      state.activeCycleTime = null; // refreshMeta() reads this as "loading…"
+      refreshMeta();
+      try {
+        const { cycleTime, steps, expectedSteps } = await resolveLatestRun(model);
+        state.activeCycleTime = cycleTime;
+        state.activeSteps = steps;
+        state.expectedSteps = expectedSteps;
+        if (model === primaryModel) {
+          document.getElementById("time-init").textContent = `IFS Initialization ${formatHumanUTC(cycleTime)}`;
+          setupTimeSlider();
+          globalShowStep(0); // T+0 by default
+        } else {
+          const primaryState = modelStates.get(primaryModel);
+          const targetHours = primaryState.activeSteps[primaryState.currentStepIndex]?.step_hours;
+          const idx = targetHours == null ? 0 : steps.findIndex((s) => s.step_hours === targetHours);
+          showStep(state, idx === -1 ? 0 : idx);
+        }
+        unstickNarrowViewportDataLoad();
+        startPollingForNewSteps(state);
+      } catch (err) {
+        console.error(err);
+        state.loadError = err.message;
+      }
+      refreshMeta();
+    }
+
+    // Handles a Models checkbox changing. See the multi-model design note
+    // above makeModelState for the primary/secondary split this maintains.
+    function onModelToggle(key, checked) {
+      if (checked) selectedModels.add(key);
+      else selectedModels.delete(key);
+
+      if (selectedModels.size === 0) {
+        // Never allow zero models selected -- there'd be nothing left to
+        // drive the shared timeline. Undo and bail.
+        selectedModels.add(key);
+        document.querySelector(`#model-toggles input[data-model="${key}"]`).checked = true;
+        return;
+      }
+
+      const previousPrimary = primaryModel;
+      primaryModel = pickPrimaryModel();
+
+      if (!checked) {
+        // Unchecking: hide this model's on-screen layers (cache stays
+        // intact, so re-checking it later is instant).
+        const state = modelStates.get(key);
+        if (state.visibleStepIndex !== -1) setStepVisibility(state, state.visibleStepIndex, false);
+        state.currentStepIndex = -1;
+        if (key === previousPrimary && primaryModel) {
+          // The model driving the shared slider just got turned off -- hand
+          // control to the next selected model, preserving position by
+          // forecast hour where possible.
+          const oldPrimaryState = modelStates.get(previousPrimary);
+          const targetHours = oldPrimaryState.activeSteps[oldPrimaryState.currentStepIndex]?.step_hours;
+          const newPrimaryState = modelStates.get(primaryModel);
+          if (newPrimaryState.activeSteps.length > 0) {
+            document.getElementById("time-init").textContent =
+              `IFS Initialization ${formatHumanUTC(newPrimaryState.activeCycleTime)}`;
+            setupTimeSlider();
+            const idx = targetHours == null ? -1 : newPrimaryState.activeSteps.findIndex((s) => s.step_hours === targetHours);
+            globalShowStep(idx === -1 ? 0 : idx);
+          } else {
+            loadModelData(primaryModel);
+          }
+        }
+        refreshMeta();
+        return;
+      }
+
+      // Checking a model on.
+      const state = modelStates.get(key);
+      if (state.activeSteps.length === 0 && !state.loadError) {
+        loadModelData(key); // first time this model's ever been selected
+      } else if (key === primaryModel && previousPrimary !== primaryModel) {
+        // Promoted to primary (e.g. it's the only one selected now) while
+        // already holding cached data from an earlier selection -- rebuild
+        // the shared slider around it, starting from its own T+0 since
+        // there's no other selected model's position to preserve.
+        document.getElementById("time-init").textContent = `IFS Initialization ${formatHumanUTC(state.activeCycleTime)}`;
+        setupTimeSlider();
+        globalShowStep(0);
+      } else if (key !== primaryModel) {
+        // Already has data cached from a previous selection -- jump
+        // straight to whatever the primary is currently showing instead of
+        // resetting to T+0.
+        const primaryState = modelStates.get(primaryModel);
+        const targetHours = primaryState.activeSteps[primaryState.currentStepIndex]?.step_hours;
+        const idx = targetHours == null ? -1 : state.activeSteps.findIndex((s) => s.step_hours === targetHours);
+        showStep(state, idx === -1 ? 0 : idx);
+      }
+      refreshMeta();
+    }
+
+    function setupInfoModal() {
+      const overlay = document.getElementById("info-overlay");
+      const open = () => overlay.classList.add("open");
+      const close = () => overlay.classList.remove("open");
+      document.getElementById("info-button").addEventListener("click", open);
+      document.getElementById("info-close").addEventListener("click", close);
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close(); // click on the backdrop, not the modal itself
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && overlay.classList.contains("open")) close();
+      });
+    }
+
+    buildClassToggles();
+    setupFrontLinesToggle();
+    buildModelToggles();
+    buildLegend();
+    setupPlayButton();
+    setupAutoLoadToggle();
+    setupInfoModal();
+    (() => {
+      const panel = document.getElementById("panel");
+      const btn = document.getElementById("panel-collapse");
+      const apply = (collapsed) => {
+        panel.classList.toggle("is-collapsed", collapsed);
+        btn.innerHTML = collapsed ? "+" : "&minus;";
+        const label = collapsed ? "Show front types" : "Minimize front types";
+        btn.setAttribute("aria-label", label);
+        btn.title = label;
+        btn.setAttribute("aria-expanded", String(!collapsed));
+        try { localStorage.setItem("panelCollapsed", collapsed ? "1" : "0"); } catch {}
+      };
+      let stored = null;
+      try { stored = localStorage.getItem("panelCollapsed"); } catch {}
+      if (stored === "1") apply(true);
+      btn.addEventListener("click", () => apply(!panel.classList.contains("is-collapsed")));
+    })();
+    document.getElementById("legend-hide").addEventListener("click", (e) => {
+      const content = document.getElementById("legend-content");
+      const hidden = content.style.display === "none";
+      content.style.display = hidden ? "block" : "none";
+      e.target.textContent = hidden ? "Hide" : "Show";
+    });
+    map.on("click", updateClickTooltip);
+    // 2026-11-16 (startup-latency pass): data used to start inside the
+    // "load" handler below, which MapLibre only fires once the style's ~40
+    // glyph PBFs and first basemap tiles have finished (~2 MB the zarr
+    // layers never touch). "style.load" is the earliest event that makes
+    // map.addLayer() legal, so the whole loadModelData pipeline (latest.json
+    // already warm from the head script, zarr.json warmed too) runs as soon
+    // as the style JSON is parsed. Layer order is unchanged -- these layers
+    // are still appended without a beforeId, on top of the basemap.
+    // isStyleLoaded() covers the (theoretical -- this module runs to
+    // completion synchronously after the map is constructed) race where the
+    // style finished before this line registered the listener.
+    function startDataLayers() {
+      primaryModel = pickPrimaryModel();
+      loadModelData(primaryModel);
+    }
+    if (map.isStyleLoaded()) startDataLayers();
+    else map.once("style.load", startDataLayers);
+    map.on("load", () => {
+      // 2026-08-21: globe view (per Taylor -- see
+      // https://hazard.degreeday.org/?layer=wildfire for the reference
+      // look). `setProjection` throws synchronously
+      // ("Error: Style is not done loading") if called before the style
+      // finishes loading -- confirmed live: calling it right after `new
+      // maplibregl.Map(...)` threw an uncaught exception at module scope,
+      // which aborted the REST of the script too (buildClassToggles() ran
+      // fine since it's before this line, but map.on("load", ...) itself
+      // never even got registered) -- so the page silently never loaded
+      // any data at all, not just "no globe". Calling it inside the
+      // "load" event handler is the fix. (The data start moved to
+      // "style.load" above -- 2026-11-16 -- but setProjection deliberately
+      // stays here on the later, fully-loaded event.)
+      map.setProjection({ type: "globe" });
+    });
+  </script>
+  <!-- /dev only: unmistakable staging marker + which data tree is being read.
+       Bottom-left is free (the control panel ends well above it, the legend
+       and attribution sit bottom-right). pointer-events none so it never
+       eats a map click. -->
+  <div id="dev-badge" style="position:fixed;left:12px;bottom:12px;z-index:50;padding:6px 10px;border-radius:8px;background:rgba(180,83,9,.92);color:#fff;font:600 12px/1.3 system-ui,sans-serif;pointer-events:none;"></div>
+  <script>
+    document.getElementById("dev-badge").textContent =
+      "DEV build \u00b7 data: " + (DEV_DATA ? "/data-dev (uint8)" : "/data (prod)");
+  </script>
+</body>
+</html>
