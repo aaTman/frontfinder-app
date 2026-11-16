@@ -70,10 +70,35 @@ http://fronts.espr.ai {
 		header @notZarrData Cache-Control "public, max-age=60"
 	}
 
+	# /data-dev/*: optional uint8-packed copy of the zarr tree for the /dev
+	# viewer (webapp/dev/index.html, opened with ?data=dev). Populated by
+	# scripts/refresh_dev_data.sh -- NOT written by the inference pipeline, so
+	# production /data is never touched. Same immutable-per-store caching rules
+	# as /data above, and it MUST be its own handle_path block for the same
+	# routing reason: otherwise /data-dev/* falls into the webapp catch-all and
+	# try_files rewrites it to index.html (HTML where JSON is expected).
+	handle_path /data-dev/* {
+		root * /srv/frontfinder-app/output-dev
+		file_server
+		header Access-Control-Allow-Origin "*"
+
+		@devZarrData path *.zarr/*
+		header @devZarrData Cache-Control "public, max-age=31536000, immutable"
+
+		@devNotZarrData not path *.zarr/*
+		header @devNotZarrData Cache-Control "public, max-age=60"
+	}
+
 	handle {
 		root * /srv/frontfinder-app/webapp
 		file_server
-		try_files {path} /index.html
+		# 2026-11-16: `{path}/index.html` before the SPA fallback so a directory
+		# URL serves its own index -- /dev/ (webapp/dev/index.html) -- instead of
+		# being rewritten to the production page. A bare `try_files {path}
+		# /index.html` doesn't count a directory as an existing file, so /dev and
+		# /dev/ silently served the PRODUCTION viewer (only /dev/index.html hit
+		# the dev build). Confirmed against a local Caddy 2.11 run of this file.
+		try_files {path} {path}/index.html /index.html
 		encode gzip
 
 		# 2026-08-22: this handle block previously set no Cache-Control at
