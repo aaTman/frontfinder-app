@@ -232,6 +232,28 @@ def main(argv: list[str] | None = None) -> int:
             "very large number to effectively disable pruning."
         ),
     )
+    parser.add_argument(
+        "--front-lines",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "also derive smooth front lines (splines) from each published step's "
+            "probabilities, written as <store>.fronts.geojson next to the zarr store "
+            "and listed in latest.json, for the webapp's optional 'Front lines' "
+            "overlay (default: on; --no-front-lines to skip). A failure here never "
+            "affects inference or publishing."
+        ),
+    )
+    parser.add_argument(
+        "--front-line-threshold",
+        type=float,
+        default=None,
+        help=(
+            "summed-probability threshold above which a probability band becomes a "
+            "front line (default: 0.25). The probabilities "
+            "are uncalibrated; tune this against what the overlay looks like."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -277,7 +299,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         cycle_date, run_hour = most_recent_completed_cycle(datetime.now(timezone.utc), args.publish_lag_hours)
 
-    results = run_cycle(run_configs, source, cycle_date, run_hour, args.output_root)
+    results = run_cycle(
+        run_configs,
+        source,
+        cycle_date,
+        run_hour,
+        args.output_root,
+        front_lines=args.front_lines,
+        front_line_threshold=args.front_line_threshold,
+    )
     logger.info(
         "cycle %s-%02dZ complete: %s",
         cycle_date, run_hour, {name: len(paths) for name, paths in results.items()},

@@ -36,6 +36,10 @@ _STORE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T\d{2}Z(?:_f\d{3})?\.zarr$")
 # segment was added 2026-08-21 alongside the multi-step forecast product,
 # but the wildcard here already covered it with no regex change needed).
 _CACHE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_\d{2}z_.*\.grib2$")
+# Per-step front-line GeoJSON and symbol-orientation sidecars written next to
+# the zarr stores by postprocess/front_lines.py (`<store name minus .zarr>` plus
+# `.fronts.geojson` / `.fields.npz`).
+_FRONTS_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T\d{2}Z(?:_f\d{3})?\.(?:fronts\.geojson|fields\.npz)$")
 
 
 def _parse_date(name: str, pattern: re.Pattern) -> date | None:
@@ -51,6 +55,10 @@ def _parse_date(name: str, pattern: re.Pattern) -> date | None:
 def prune_old_output_stores(output_root: str, max_age_days: int, now: datetime) -> list[str]:
     """Deletes model output directories under `output_root/<model>/` whose
     store name encodes a cycle date older than `max_age_days`.
+
+    Also deletes the matching per-step `<store>.fronts.geojson` files (the
+    webapp's optional front-line overlay) and `<store>.fields.npz` sidecars
+    by the same cutoff.
 
     Never touches `latest.json` (the webapp's pointer file -- see
     run_cycle.py's `_write_latest_pointer`) or anything whose name doesn't
@@ -71,7 +79,19 @@ def prune_old_output_stores(output_root: str, max_age_days: int, now: datetime) 
             continue
         for entry in sorted(os.listdir(model_dir)):
             entry_path = os.path.join(model_dir, entry)
-            if entry == "latest.json" or not os.path.isdir(entry_path):
+            if entry == "latest.json":
+                continue
+            fronts_date = _parse_date(entry, _FRONTS_NAME_RE) if os.path.isfile(entry_path) else None
+            if fronts_date is not None:
+                if fronts_date < cutoff:
+                    os.remove(entry_path)
+                    deleted.append(entry_path)
+                    logger.info(
+                        "retention: deleted %s (cycle date %s, older than %d days)",
+                        entry_path, fronts_date, max_age_days,
+                    )
+                continue
+            if not os.path.isdir(entry_path):
                 continue
             cycle_date = _parse_date(entry, _STORE_NAME_RE)
             if cycle_date is None:
