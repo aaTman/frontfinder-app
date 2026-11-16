@@ -192,3 +192,38 @@ Not yet checked live in a browser (this was implemented alongside the
 multi-step backend work in the same sandbox session, and the frontend
 verification loop that caught the two bugs above hasn't been re-run against
 this specific change) -- do that before considering this done.
+
+## /dev (staging build)
+
+`webapp/dev/` is the staging copy of the viewer, served at
+`https://fronts.espr.ai/dev/`. The production page (`webapp/index.html`) is
+untouched by it.
+
+**Baseline.** `webapp/dev/index.html` and `webapp/dev/lib.js` are snapshots of
+what fronts.espr.ai was serving on 2026-11-16 (embed mode, the front-lines
+overlay, forecast-step ticks), which is AHEAD of this repo's `main`
+(`webapp/index.html` here predates them). They carry, on top: the
+startup-latency work (flat module preloads, `latest.json` + first-step metadata
+fetched at HTML-parse time, data started on `style.load` instead of the full
+map `load`), the uint8-store handling (zarr-layer `fillValue: 255`, tooltip
+keeps decoded zeros), and an orange "DEV" badge showing which data tree is
+read. `lib.js` is dev-local (`/dev/lib.js`) so /dev doesn't depend on the
+host's drifting `/lib.js`.
+
+- `/dev/` reads the production `/data` tree (float32 today) -- compare load
+  time against `/` on identical data.
+- `/dev/?data=dev` reads `/data-dev`, a uint8-packed copy (~35x smaller).
+  Build/refresh it with `scripts/refresh_dev_data.sh` (idempotent: skips
+  finished stores, prunes what `/data` retention removed, copies `latest.json`
+  last). It only reads `output/` and writes `output-dev/`.
+- `deploy/Caddyfile` needs the `/data-dev/*` route and
+  `try_files {path} {path}/index.html /index.html` (without the latter,
+  `/dev/` is silently rewritten to the production page).
+- The live inference path still writes float32: uint8 packing in
+  `write_front_pyramid` is opt-in (`FRONTFINDER_PACK_UINT8=1` or
+  `pack_uint8=True`) until the dev viewer is promoted, because the production
+  client can't render uint8 correctly yet.
+- Promote by replacing `webapp/index.html`/`lib.js` with the dev copies,
+  switching the `/dev/lib.js` import back to `./lib.js`, restoring
+  `ZARR_ROOT = "/data"`, dropping the badge and `?data=` switch, then setting
+  `FRONTFINDER_PACK_UINT8=1` on the scheduler.
