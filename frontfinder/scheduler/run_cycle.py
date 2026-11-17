@@ -39,7 +39,7 @@ from frontfinder.ingest.ecmwf_ifs import (
     assemble_model_input,
     target_steps_for_cycle,
 )
-from frontfinder.zarrio.pyramid import FrontFields, build_front_pyramid, write_front_pyramid
+from frontfinder.zarrio.pyramid import FrontFields, build_front_pyramid, pack_uint8_enabled, write_front_pyramid
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,23 @@ def run_one_model(
     store_name = _store_name(cycle)
     store_path = os.path.join(output_root, manifest.name, store_name)
     os.makedirs(os.path.dirname(store_path), exist_ok=True)
-    write_front_pyramid(pyramid, store_path)
+    pack = pack_uint8_enabled()
+    if pack and save_orientation_fields:
+        # (the flag means "front lines are on".) The store is about to be
+        # uint8-packed, which quantizes the grids the front lines are derived
+        # from; keep the exact float32 ones beside it, saved BEFORE the write
+        # because packing mutates the pyramid in place. Best effort: without
+        # it the lines fall back to the packed values.
+        try:
+            from frontfinder.postprocess.front_lines import probabilities_filename, save_probabilities_sidecar
+
+            save_probabilities_sidecar(
+                pyramid.datatree["0"].to_dataset(),
+                os.path.join(os.path.dirname(store_path), probabilities_filename(store_name)),
+            )
+        except Exception:
+            logger.exception("could not save the probabilities sidecar for %s -- front lines will use packed values", store_path)
+    write_front_pyramid(pyramid, store_path, pack_uint8=pack)
     logger.info("wrote %s", store_path)
     if orientation_fields is not None:
         try:

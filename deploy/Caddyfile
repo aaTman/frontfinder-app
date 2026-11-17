@@ -63,6 +63,13 @@ http://fronts.espr.ai {
 		# Confirmed live: with an unconditional default, zarr chunk
 		# responses kept coming back `max-age=60` even after adding the
 		# `@zarrData`-matched immutable header above it.
+		# The per-step `.fields.npz` / `.probs.npz` sidecars (front-line inputs,
+		# ~25 MB each for the probabilities) live next to the stores for the
+		# pipeline's own use; nothing in the webapp reads them, so don't serve
+		# them -- otherwise anyone can pull them over this home connection.
+		@npz path *.npz
+		respond @npz 404
+
 		@zarrData path *.zarr/*
 		header @zarrData Cache-Control "public, max-age=31536000, immutable"
 

@@ -205,3 +205,76 @@ def test_without_a_sidecar_the_step_still_gets_lines(tmp_path):
     written = front_lines.write_front_lines(str(tmp_path), [entry(store, "2026-10-31T06:00:00")])
     assert store in written
     assert json.loads((tmp_path / written[store]).read_text())["oriented"] is False  # so the viewer draws no symbols
+
+
+# --- exact front lines from uint8-packed stores (the .probs.npz sidecar) ---
+
+
+def _smooth_fields(valid_time="2026-10-31T06:00:00"):
+    """Smooth, noisy-enough class grids that packing to 1/254 really moves values
+    (a clean 0.9 ridge would round-trip almost exactly and prove nothing)."""
+    rng = np.random.default_rng(5)
+    yy, xx = np.mgrid[0 : len(LAT), 0 : len(LON)]
+    probs = {cls: (0.004 * rng.random(yy.shape)).astype(np.float32) for cls in MANIFEST.served_classes}
+    probs["cold"] += (0.5 * np.exp(-((yy - 20 - 0.1 * xx) ** 2) / (2 * 2.5**2))).astype(np.float32)
+    probs["warm"] += (0.45 * np.exp(-((yy - 40 + 0.05 * xx) ** 2) / (2 * 2.0**2))).astype(np.float32)
+    return FrontFields(probabilities=probs, lat=LAT, lon=LON, valid_time=valid_time, cycle_time="2026-10-31T06:00:00")
+
+
+def _write_pair(tmp_path, store_name="2026-10-31T06Z_f000.zarr", sidecar=True):
+    """Same fields written (a) float32 and (b) uint8-packed, with or without the sidecar."""
+    fields = _smooth_fields()
+    float_dir, packed_dir = tmp_path / "float", tmp_path / "packed"
+    float_dir.mkdir(), packed_dir.mkdir()
+    write_front_pyramid(build_front_pyramid(fields, MANIFEST, n_levels=2), str(float_dir / store_name), pack_uint8=False)
+    pyramid = build_front_pyramid(fields, MANIFEST, n_levels=2)
+    if sidecar:
+        front_lines.save_probabilities_sidecar(
+            pyramid.datatree["0"].to_dataset(), str(packed_dir / front_lines.probabilities_filename(store_name))
+        )
+    write_front_pyramid(pyramid, str(packed_dir / store_name), pack_uint8=True)
+    return float_dir, packed_dir, store_name
+
+
+def test_probabilities_filename_swaps_the_zarr_suffix():
+    assert front_lines.probabilities_filename("2026-10-31T06Z_f006.zarr") == "2026-10-31T06Z_f006.probs.npz"
+    with pytest.raises(ValueError):
+        front_lines.probabilities_filename("latest.json")
+
+
+def test_packed_store_with_sidecar_loads_exactly_the_float32_grids(tmp_path):
+    float_dir, packed_dir, name = _write_pair(tmp_path)
+    exact = front_lines.load_probabilities(str(float_dir / name))
+    via_sidecar = front_lines.load_probabilities(str(packed_dir / name))
+    assert set(exact.data_vars) == set(via_sidecar.data_vars)
+    for code in exact.data_vars:
+        assert via_sidecar[code].dtype == np.float32
+        np.testing.assert_array_equal(via_sidecar[code].values, exact[code].values)
+    np.testing.assert_array_equal(via_sidecar["latitude"].values, exact["latitude"].values)
+    np.testing.assert_array_equal(via_sidecar["longitude"].values, exact["longitude"].values)
+
+
+def test_packed_store_without_sidecar_falls_back_to_the_packed_values(tmp_path):
+    float_dir, packed_dir, name = _write_pair(tmp_path, sidecar=False)
+    exact = front_lines.load_probabilities(str(float_dir / name))
+    packed = front_lines.load_probabilities(str(packed_dir / name))
+    worst = max(float(np.abs(packed[c].values - exact[c].values).max()) for c in exact.data_vars)
+    assert 0 < worst <= 0.5 / 254 + 1e-6  # quantized, within the packing error
+
+
+def test_front_lines_are_byte_identical_whether_the_store_is_float32_or_packed_with_sidecar(tmp_path):
+    float_dir, packed_dir, name = _write_pair(tmp_path)
+    entries = [entry(name, "2026-10-31T06:00:00")]
+    front_lines.write_front_lines(str(float_dir), entries)
+    front_lines.write_front_lines(str(packed_dir), entries)
+    out = front_lines.fronts_filename(name)
+    a, b = [(d / out).read_bytes() for d in (float_dir, packed_dir)]
+    assert json.loads(a)["features"], "the synthetic fronts should produce lines"
+    assert a == b
+
+
+def test_a_corrupt_sidecar_falls_back_to_the_store(tmp_path):
+    float_dir, packed_dir, name = _write_pair(tmp_path)
+    (packed_dir / front_lines.probabilities_filename(name)).write_bytes(b"not an npz")
+    ds = front_lines.load_probabilities(str(packed_dir / name))
+    assert set(ds.data_vars) == {"CF", "WF", "SF", "OF", "DL", "TROF", "TT"}
