@@ -3,6 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Embedded mode: when framed (e.g. by the espr.ai dashboard tab bar) or opened
+       with ?embed=1, hide this page's own site nav so the host's chrome isn't doubled. -->
+  <script>
+    (function () {
+      try {
+        var q = new URLSearchParams(location.search).get('embed');
+        if (window.self !== window.top || q === '1') document.documentElement.classList.add('embedded');
+      } catch (e) { document.documentElement.classList.add('embedded'); }
+    })();
+  </script>
+  <style>
+    html.embedded .site-nav { display: none !important; }
+    html.embedded { --nav-height: 0px !important; }
+  </style>
   <title>Fronts — ESPR</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <!-- v5, not v4: globe projection (map.setProjection below) doesn't exist
@@ -10,7 +24,92 @@
        dist/maplibre-gl.d.ts (no `setProjection`/`ProjectionSpecification`)
        vs v5.24.0's, which has both. Bumped 2026-08-21 alongside adding the
        globe view. -->
-  <link href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet" />
+  <!-- 2026-11-16 (startup-latency pass): open the connections this page's
+       resources need before any script runs. crossorigin: every one of these
+       origins is fetched in CORS mode (esm.sh/unpkg modules, maplibre's
+       fetch()-based style/tile/glyph requests), and a plain preconnect would
+       warm the wrong (non-CORS) connection pool. -->
+  <link rel="preconnect" href="https://esm.sh" crossorigin />
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
+  <!-- Same pass: modulepreload the ENTIRE esm.sh import graph up front. The
+       importmap only pins the two top-level entries; esm.sh serves those as
+       one-line shims that re-export deeper paths, so the real graph is a
+       3-level waterfall -- entry shim -> zarr-layer.mjs / maplibre-gl.mjs ->
+       zarrita/proj4/delaunator/raster-reproject shims -> their leaf .mjs
+       files -- where each level only starts downloading once the previous
+       one has. The numcodecs zstd decoder (its 302 KB zstd.mjs) used to sit
+       even further down: it was only fetched AFTER the first chunk response
+       arrived, serially blocking first paint of the data. Every URL below is
+       copied from the module sources esm.sh actually serves (fetched and
+       checked 2026-11-16) -- note the literal ^ in the ^-range shims and the
+       ?target=es2022 query esm.sh appends for this browser, both of which
+       must match the later import exactly or the preload is wasted. Resolved
+       ranges means an esm.sh re-resolution (e.g. zarrita 0.7.7) would strand
+       stale preloads as unused small fetches until this list is refreshed;
+       the pinned importmap entries below stay authoritative. -->
+  <link rel="modulepreload" href="https://esm.sh/maplibre-gl@5.24.1" />
+  <link rel="modulepreload" href="https://esm.sh/maplibre-gl@5.24.1/es2022/maplibre-gl.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@carbonplan/zarr-layer@0.12.1" />
+  <link rel="modulepreload" href="https://esm.sh/@carbonplan/zarr-layer@0.12.1/es2022/zarr-layer.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@developmentseed/raster-reproject@^0.8.1?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/@developmentseed/raster-reproject@0.8.1/es2022/raster-reproject.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/delaunator@^5.1.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/delaunator@5.1.0/es2022/delaunator.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/robust-predicates@^3.0.2?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/robust-predicates@3.0.3/es2022/robust-predicates.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/proj4@^2.22.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/proj4@2.23.0/es2022/proj4.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/mgrs@1.0.0/es2022/mgrs.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/wkt-parser@^1.9.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/wkt-parser@1.9.0/es2022/wkt-parser.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/zarrita@^0.7.5?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/zarrita@0.7.6/es2022/zarrita.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@^0.2.1/fetch?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@0.2.1/es2022/dist/src/util.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@0.2.1/es2022/fetch.mjs" />
+  <!-- The zstd codec numcodecs dynamically imports once the first chunk
+       arrives -- preloading it here takes it off that serial path. -->
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@^0.3.2/zstd?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@0.3.2/es2022/dist/chunk-INHXZS53.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@0.3.2/es2022/zstd.mjs" />
+  <!-- Pinned to the exact version esm.sh's @5 range resolves to anyway
+       (5.24.1, confirmed 2026-11-16): unpkg's @5 alias 302-redirects per
+       request, costing a round trip at the front of the waterfall. Keep in
+       sync with the importmap below. -->
+  <link href="https://unpkg.com/maplibre-gl@5.24.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script>
+    // 2026-11-16 (startup-latency pass): this classic inline script runs at
+    // HTML-parse time, while the esm.sh module graph (script type="module",
+    // below) is still downloading and the basemap style hasn't even been
+    // requested. Kicking latest.json off here -- and the first step's root
+    // zarr.json as soon as it parses -- moves the whole data pipeline's
+    // network leg ahead of the map instead of behind it (it used to start
+    // only on the map's "load" event, i.e. after ~2 MB of glyphs/tiles).
+    // Nothing is parsed here; the module's resolveLatestRun() consumes the
+    // stored promise. latest.json itself is deliberately no-store (it's a
+    // moving pointer, see resolveLatestRun); the step's zarr.json is safe to
+    // warm because every zarr store path is served immutable (Caddy
+    // Cache-Control, see the clearAllCachedLayers comment) -- the zarr-layer
+    // metadata fetch later hits the browser HTTP cache with no extra
+    // network request.
+    //
+    // Keep these two literals in sync with MODELS.latestPointer below --
+    // they can't be derived from it because this script runs before the
+    // module graph is loaded.
+    const LATEST_MODEL = "nbs_square_dilation_trof_tt_no_inst";
+    const LATEST_POINTER = `/data/${LATEST_MODEL}/latest.json`;
+    const warm = fetch(LATEST_POINTER, { cache: "no-store" }).then((res) => {
+      if (!res.ok) throw new Error(`no published run for ${LATEST_MODEL} (HTTP ${res.status})`);
+      return res.json();
+    });
+    window.__latestRunPromise = { model: LATEST_MODEL, promise: warm };
+    warm.catch(() => {}); // no unhandled-rejection noise if resolveLatestRun never consumes it
+    warm.then((latest) => {
+      const step = latest?.steps?.[0];
+      if (step?.store) fetch(`/data/${LATEST_MODEL}/${step.store}/zarr.json`, { priority: "high" }).catch(() => {});
+    });
+  </script>
   <style>
     /* 2026-08-24: top nav bar mimicking espr.ai's own site-nav, added per
        Taylor's request. Colors/fonts/breakpoint pulled directly from
@@ -163,6 +262,8 @@
     #panel.is-collapsed #model-toggles,
     #panel.is-collapsed #class-toggles-label,
     #panel.is-collapsed #class-toggles,
+    #panel.is-collapsed #overlay-toggles-label,
+    #panel.is-collapsed #overlay-toggles,
     #panel.is-collapsed #meta { display: none; }
 
     /* 2026-08-24: info modal, added per Taylor's request -- paper link +
@@ -205,6 +306,9 @@
     .class-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
     .class-row input[type="checkbox"] { accent-color: #3d6bff; }
     .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    /* Optional overlays (currently just "Front lines"). The status text
+       only shows when the overlay is on but has nothing to draw. */
+    #front-lines-status { color: #8b90a0; font-size: 11px; }
     #time-control {
       margin-top: 10px; border-top: 1px solid #2a2f3d; padding-top: 10px;
       display: none; /* shown once a run with >1 step is loaded */
@@ -218,7 +322,20 @@
        blowing out #panel's width -- range inputs don't respect flex-basis
        like other elements without it. */
     #time-scrubber { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-    #time-scrubber input[type="range"] { flex: 1; min-width: 0; accent-color: #3d6bff; }
+    #time-track { flex: 1; min-width: 0; }
+    #time-scrubber input[type="range"] { width: 100%; margin: 0; accent-color: #3d6bff; }
+    /* Tick per EXPECTED forecast step: light = published, red = not yet.
+       Positions inset by half a slider thumb (8px) so they line up with
+       where the native thumb actually travels. */
+    #time-ticks { position: relative; height: 12px; margin-top: 2px; }
+    .step-tick {
+      position: absolute; top: 0; width: 2px; height: 8px; margin-left: -1px;
+      border-radius: 1px; background: #e6e8ee; padding: 0; border: 0; cursor: pointer;
+    }
+    .step-tick.is-missing { background: #e5484d; height: 6px; top: 1px; cursor: default; }
+    .step-tick.is-current { background: #3d6bff; height: 12px; width: 3px; margin-left: -1.5px; }
+    /* Widen the hit area of clickable ticks without changing their look. */
+    .step-tick::after { content: ""; position: absolute; inset: -4px; }
     #time-max-lead { flex: none; font-size: 11px; color: #8b90a0; }
     #play-button {
       flex: none; width: 26px; height: 26px; border-radius: 50%; padding: 0;
@@ -407,6 +524,13 @@
     <div id="model-toggles" hidden></div>
     <div id="class-toggles-label" class="panel-subheading">Front &amp; trough types</div>
     <div id="class-toggles"></div>
+    <div id="overlay-toggles-label" class="panel-subheading">Overlays</div>
+    <div id="overlay-toggles">
+      <label class="class-row" title="Smooth lines fitted to the probability bands, with standard front symbols: cold = triangles, warm = semicircles, occluded = both, stationary = alternating. Dashed: troughs and drylines.">
+        <input type="checkbox" id="front-lines-checkbox" />
+        Front lines <span id="front-lines-status"></span>
+      </label>
+    </div>
     <div id="time-control">
       <div id="time-label">
         <div id="time-init">IFS Initialization --</div>
@@ -414,7 +538,10 @@
       </div>
       <div id="time-scrubber">
         <button id="play-button" type="button" aria-label="Play">&#9654;</button>
-        <input type="range" id="time-slider" min="0" max="0" value="0" step="1" />
+        <div id="time-track">
+          <input type="range" id="time-slider" min="0" max="0" value="0" step="1" />
+          <div id="time-ticks" aria-label="Forecast steps: light = published, red = not yet published"></div>
+        </div>
         <span id="time-max-lead"></span>
       </div>
       <label id="autoload-toggle">
@@ -551,11 +678,17 @@
     </div>
   </div>
 
+  <!-- 2026-11-16 (startup-latency pass): pinned to the exact versions the
+       bare @5 ranges were resolving to anyway (confirmed 2026-11-16), so an
+       upstream release can never silently change what this page loads or
+       invalidate the head's modulepreload list. Keep in sync with the unpkg
+       CSS link and the modulepreload URLs above. (No HTML comments INSIDE
+       the script tag below -- importmap contents must be bare JSON.) -->
   <script type="importmap">
     {
       "imports": {
-        "maplibre-gl": "https://esm.sh/maplibre-gl@5",
-        "@carbonplan/zarr-layer": "https://esm.sh/@carbonplan/zarr-layer"
+        "maplibre-gl": "https://esm.sh/maplibre-gl@5.24.1",
+        "@carbonplan/zarr-layer": "https://esm.sh/@carbonplan/zarr-layer@0.12.1"
       }
     }
   </script>
@@ -570,6 +703,15 @@
       frontBinBoundaries,
       labeledTickIndices,
       formatTickLabel,
+      frontLinesUrl,
+      withLineClasses,
+      lineColorExpression,
+      lineFilter,
+      solidLineFilter,
+      FRONT_SYMBOL_PATTERNS,
+      symbolImageName,
+      symbolFilter,
+      symbolPeriods,
     } from "./lib.js";
 
     // -----------------------------------------------------------------
@@ -710,7 +852,7 @@
           discard; // background noise, not a front -- see comment above
         }
         // Evenly-spaced 0.1-wide bins from 0.1 up to 1.0, plus the
-        // narrower 0.01-0.1 "just above background" bin. Opacity ramps
+        // narrower 0.05-0.1 "just above background" bin. Opacity ramps
         // linearly across all ${FRONT_N_BINS} bins.
         float bin = min(floor(p / ${FRONT_BIN_WIDTH.toFixed(3)}), ${(FRONT_N_BINS - 1).toFixed(1)});
         float bandOpacity = (bin + 1.0) / ${FRONT_N_BINS.toFixed(1)};
@@ -739,6 +881,12 @@
       // the browser console. Costs a bit of extra GPU memory/bandwidth for
       // the preserved buffer; negligible at this map's scale.
       preserveDrawingBuffer: true,
+      // Keep the view (lat/lon/zoom) in the URL hash, same as
+      // spreadanomaly.espr.ai. Both sites read the hash on load, so a nav
+      // flip between them (spreadanomaly copies its live hash onto the
+      // Fronts link) reopens the map at the identical view, and browser
+      // back restores the view you left.
+      hash: true,
     });
     // Debugging aid: `map` is a module-scope binding, so it isn't reachable
     // from the DevTools console (which evaluates in global/window scope)
@@ -770,6 +918,7 @@
         // resolveLatestRun) -- fetched once per model load, not re-fetched
         // on every slider move, so dragging the slider is instant rather
         // than round-tripping to latest.json each time.
+        expectedSteps: [], // lead hours the cycle is targeting (published or not)
         activeSteps: [], // [{step_hours, valid_time, store}, ...] ascending
         activeCycleTime: null,
         loadError: null, // set on a failed/never-attempted resolveLatestRun
@@ -1081,8 +1230,10 @@
         document.getElementById("time-valid").textContent = formatHumanUTC(step.valid_time);
         document.getElementById("time-lead").textContent = formatForecastHour(step.step_hours);
       }
-      document.getElementById("time-slider").value = String(index);
+      setSliderSlot(slotOfIndex(state, index));
+      renderStepTicks(state, index);
       hideClickTooltip(); // last reading belongs to whatever was visible before
+      refreshFrontLines(); // optional overlay: follows the step that is actually on screen
     }
 
     function revealStep(state, index) {
@@ -1250,7 +1401,7 @@
     //
     // All 11 boundaries labeled was tried first and rejected: screenshotted
     // the rendered legend at this card's width and the 9px labels
-    // overlapped into unreadable smashed text (narrowest gap, 0.01 next to
+    // overlapped into unreadable smashed text (narrowest gap, 0.05 next to
     // 0.1, has no room for two ~4-char labels side by side). Every other
     // boundary gets a number; every boundary still gets an unlabeled tick
     // mark so the bin edges stay visible.
@@ -1343,7 +1494,17 @@
               }
             })
           );
-          return { key, classResults: classResults.filter((r) => r && r.value > 0) };
+          // Finite zero is a real reading, not missing: uint8 stores
+          // quantize all sub-quantum probabilities (< 1/254 ~ 0.004) to an
+          // exact 0 code where a float32 store carries tiny nonzero dust,
+          // so the `value > 0` this filter used to test dropped every
+          // quantized-to-zero class row -- and the entire tooltip at an
+          // all-background point -- from the uint8 pages while the float32
+          // pages kept showing their "0%" rows for the same points. NaN
+          // rows (real float NaNs and the uint8 _FillValue sentinel, now
+          // declared to the layer via fillValue above) are still excluded
+          // by the Number.isFinite check above.
+          return { key, classResults: classResults.filter((r) => r && r.value >= 0) };
         })
       );
       if (requestId !== clickRequestId) return; // superseded by a newer click
@@ -1400,9 +1561,232 @@
             setStepVisibility(state, state.visibleStepIndex, true);
           }
           hideClickTooltip(); // last reading may include/omit this class's now-stale visibility
+          applyFrontLineFilters(); // the class's front lines follow its checkbox too
         });
         container.appendChild(row);
       }
+    }
+
+    // -----------------------------------------------------------------
+    // Optional "Front lines" overlay. Off by default; nothing is fetched
+    // until the checkbox is on. The scheduler writes one GeoJSON of smooth,
+    // typed front lines per step (frontfinder/postprocess/front_lines.py)
+    // and lists it as `fronts` on that step's latest.json entry. This only
+    // ever draws the PRIMARY model's visible step, on its own GeoJSON source
+    // + three line layers, independent of the zarr probability layers (it
+    // does not touch their visibility, opacity or caching).
+    //
+    // Longitudes in these files are never cut at the antimeridian (a front
+    // crossing 180 reads 175, 185, ...), which MapLibre draws as one line.
+    // -----------------------------------------------------------------
+    const FRONT_LINES_SOURCE = "front-lines";
+    const SYMBOL_LAYER_PREFIX = "front-lines-symbols-";
+    const FRONT_LINE_LAYERS = [
+      "front-lines-casing",
+      "front-lines-solid",
+      "front-lines-dashed",
+      ...symbolPeriods().map((period) => `${SYMBOL_LAYER_PREFIX}${period}`), // drawn last, on top of the lines
+    ];
+    const EMPTY_LINES = { type: "FeatureCollection", features: [] };
+    const FRONT_LINES_CACHE_MAX = 12; // steps kept in memory (~100 kB each)
+    const frontLinesCache = new Map(); // url -> tagged FeatureCollection, oldest first
+    let frontLinesEnabled = false;
+    let frontLinesToken = 0; // a newer refresh supersedes an older in-flight fetch
+
+    function setFrontLinesStatus(text) {
+      document.getElementById("front-lines-status").textContent = text;
+    }
+
+    function visibleClasses() {
+      return [...classVisible].filter(([, visible]) => visible).map(([cls]) => cls);
+    }
+
+    // Front symbols: one repeating tile per (class, side), drawn on a canvas
+    // and registered as a map image. The tile is `period` px wide with the
+    // line through its middle; symbols sit on it with their base on the line,
+    // pointing up (the line's LEFT while walking along it) or down (its
+    // RIGHT). MapLibre rotates the tile with the line and repeats it every
+    // `period` px (see the symbol layers below). Patterns: lib.js
+    // FRONT_SYMBOL_PATTERNS. Drawn at 2x for sharpness (pixelRatio 2).
+    const SYMBOL_SCALE = 2;
+    const SYMBOL_HALF_WIDTH = 6; // px: triangles are 12 wide, semicircles 12 across
+    const SYMBOL_HEIGHT = 10; // px: how far a triangle points off the line
+    const SYMBOL_TILE_HEIGHT = 28; // px, line through the middle; leaves room above and below the symbols
+
+    function drawSymbolTile(cls, side) {
+      const { period, symbols } = FRONT_SYMBOL_PATTERNS[cls];
+      const w = period * SYMBOL_SCALE;
+      const h = SYMBOL_TILE_HEIGHT * SYMBOL_SCALE;
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      const cy = h / 2;
+      for (const seg of FRONT_SYMBOL_PATTERNS[cls].line ?? []) {
+        ctx.beginPath();
+        ctx.moveTo(seg.from * w, cy);
+        ctx.lineTo(seg.to * w, cy);
+        ctx.lineWidth = 3 * SYMBOL_SCALE;
+        ctx.lineCap = "butt";
+        ctx.strokeStyle = seg.color;
+        ctx.stroke();
+      }
+      for (const symbol of symbols) {
+        const cx = symbol.at * w;
+        const r = SYMBOL_HALF_WIDTH * SYMBOL_SCALE;
+        const left = (symbol.side === "same") === (side === "left"); // true: this symbol points to the line's left
+        const dir = left ? -1 : 1; // canvas y grows downward, so "up" is -1
+        ctx.beginPath();
+        if (symbol.shape === "triangle") {
+          ctx.moveTo(cx - r, cy);
+          ctx.lineTo(cx + r, cy);
+          ctx.lineTo(cx, cy + dir * SYMBOL_HEIGHT * SYMBOL_SCALE);
+        } else {
+          ctx.arc(cx, cy, r, left ? Math.PI : 0, left ? 2 * Math.PI : Math.PI, false);
+        }
+        ctx.closePath();
+        ctx.fillStyle = symbol.color;
+        ctx.fill();
+        ctx.lineWidth = SYMBOL_SCALE; // thin dark outline, like the line casing
+        ctx.strokeStyle = "rgba(11, 14, 22, 0.7)";
+        ctx.stroke();
+      }
+      return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
+    }
+
+    function registerFrontSymbolImages() {
+      for (const cls of Object.keys(FRONT_SYMBOL_PATTERNS)) {
+        for (const side of ["left", "right"]) {
+          const name = symbolImageName(cls, side);
+          if (!map.hasImage(name)) map.addImage(name, drawSymbolTile(cls, side), { pixelRatio: SYMBOL_SCALE });
+        }
+      }
+    }
+
+    function ensureFrontLineLayers() {
+      if (map.getSource(FRONT_LINES_SOURCE)) return;
+      map.addSource(FRONT_LINES_SOURCE, { type: "geojson", data: EMPTY_LINES });
+      // `zoom` may only be the input of a top-level interpolate/step, so the
+      // casing (2px wider all round) gets its own expression, not `width + 2`.
+      const width = ["interpolate", ["linear"], ["zoom"], 1, 1.4, 6, 2.6, 10, 3.6];
+      const casingWidth = ["interpolate", ["linear"], ["zoom"], 1, 3.4, 6, 4.6, 10, 5.6];
+      const line = { "line-cap": "round", "line-join": "round" };
+      // Dark casing under the colored line keeps it legible over both the
+      // pale (low probability) and saturated (high probability) rasters.
+      map.addLayer({
+        id: "front-lines-casing", type: "line", source: FRONT_LINES_SOURCE, layout: line,
+        paint: { "line-color": "#0b0e16", "line-opacity": 0.55, "line-width": casingWidth },
+      });
+      map.addLayer({
+        id: "front-lines-solid", type: "line", source: FRONT_LINES_SOURCE, layout: line,
+        paint: { "line-color": lineColorExpression(), "line-width": width },
+      });
+      map.addLayer({
+        id: "front-lines-dashed", type: "line", source: FRONT_LINES_SOURCE, layout: line,
+        paint: { "line-color": lineColorExpression(), "line-width": width, "line-dasharray": [3, 2] },
+      });
+      registerFrontSymbolImages();
+      for (const period of symbolPeriods()) {
+        // `symbol-spacing` is not data-driven, so each tile width (cold/warm:
+        // 26 px, occluded/stationary: 52 px) gets its own layer. Spacing and
+        // icon size shrink together at low zoom so tiles still butt up.
+        const sizeAt = (z) => ({ 1: 0.6, 6: 0.85, 10: 1 })[z];
+        map.addLayer({
+          id: `${SYMBOL_LAYER_PREFIX}${period}`, type: "symbol", source: FRONT_LINES_SOURCE,
+          layout: {
+            "symbol-placement": "line",
+            "symbol-spacing": ["interpolate", ["linear"], ["zoom"], 1, period * sizeAt(1), 6, period * sizeAt(6), 10, period * sizeAt(10)],
+            "icon-image": ["concat", "front-sym-", ["get", "cls"], "-", ["get", "side"]],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 1, sizeAt(1), 6, sizeAt(6), 10, sizeAt(10)],
+            "icon-rotation-alignment": "map",
+            "icon-pitch-alignment": "map",
+            "icon-keep-upright": false, // the tile's "up" must stay the line's left, however it is oriented on screen
+            "icon-allow-overlap": true,
+            "icon-ignore-placement": true,
+          },
+        });
+      }
+      applyFrontLineFilters();
+    }
+
+    // The class checkboxes apply to the lines too: an unchecked class hides
+    // both its raster layer and its lines.
+    function applyFrontLineFilters() {
+      if (!map.getLayer("front-lines-solid")) return;
+      const shown = visibleClasses();
+      map.setFilter("front-lines-solid", solidLineFilter(shown));
+      map.setFilter("front-lines-dashed", lineFilter(true, shown));
+      // The casing follows whichever of the two draws that feature.
+      map.setFilter("front-lines-casing", ["in", ["get", "cls"], ["literal", shown]]);
+      for (const period of symbolPeriods()) map.setFilter(`${SYMBOL_LAYER_PREFIX}${period}`, symbolFilter(period, shown));
+    }
+
+    // New zarr layers are added on top of the stack as steps get visited;
+    // keep the lines above all of them.
+    function raiseFrontLines() {
+      for (const id of FRONT_LINE_LAYERS) if (map.getLayer(id)) map.moveLayer(id);
+    }
+
+    function clearFrontLines() {
+      map.getSource(FRONT_LINES_SOURCE)?.setData(EMPTY_LINES);
+    }
+
+    async function fetchFrontLines(url) {
+      const cached = frontLinesCache.get(url);
+      if (cached) return cached;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      const tagged = withLineClasses(await res.json());
+      frontLinesCache.set(url, tagged);
+      while (frontLinesCache.size > FRONT_LINES_CACHE_MAX) frontLinesCache.delete(frontLinesCache.keys().next().value);
+      return tagged;
+    }
+
+    // Shows the lines for whatever step of the primary model is on screen
+    // (or clears them). Called when the checkbox changes, when a new step is
+    // revealed, and when new steps are published.
+    async function refreshFrontLines() {
+      const token = ++frontLinesToken;
+      if (!frontLinesEnabled) {
+        clearFrontLines();
+        setFrontLinesStatus("");
+        return;
+      }
+      const state = modelStates.get(primaryModel);
+      const step = state?.activeSteps[state.visibleStepIndex];
+      if (!step) return; // nothing on screen yet; revealing a step calls this again
+      const url = frontLinesUrl(ZARR_ROOT, state.key, step);
+      if (!url) {
+        clearFrontLines();
+        setFrontLinesStatus("(none for this step)");
+        return;
+      }
+      try {
+        const lines = await fetchFrontLines(url);
+        if (token !== frontLinesToken) return; // superseded while fetching
+        ensureFrontLineLayers();
+        map.getSource(FRONT_LINES_SOURCE).setData(lines);
+        raiseFrontLines();
+        // Symbols need the 850 hPa fields to be placed on the right side; a
+        // step without them (see front_lines.py) shows plain lines.
+        setFrontLinesStatus(lines.oriented ? "" : "(no symbols for this step)");
+      } catch (err) {
+        if (token !== frontLinesToken) return;
+        console.error(err);
+        clearFrontLines();
+        setFrontLinesStatus("(unavailable)");
+      }
+    }
+
+    function setupFrontLinesToggle() {
+      const checkbox = document.getElementById("front-lines-checkbox");
+      // ?lines=1 opens the page with the overlay already on (shareable link).
+      frontLinesEnabled = new URLSearchParams(location.search).get("lines") === "1";
+      checkbox.checked = frontLinesEnabled;
+      checkbox.addEventListener("change", () => {
+        frontLinesEnabled = checkbox.checked;
+        refreshFrontLines();
+      });
     }
 
     function buildModelToggles() {
@@ -1438,13 +1822,106 @@
       // 6h out to 240h -- 90h for 06Z/18Z cycles, see
       // ecmwf_ifs.target_steps_for_cycle):
       //   {"cycle_time": "...", "steps": [{"step_hours", "valid_time", "store"}, ...]}
-      const res = await fetch(MODELS[model].latestPointer, { cache: "no-store" });
-      if (!res.ok) throw new Error(`no published run for ${model} (HTTP ${res.status})`);
-      const { cycle_time, steps } = await res.json();
+      // 2026-11-16 (startup-latency pass): the head's inline script already
+      // started this exact request at HTML-parse time (see
+      // window.__latestRunPromise) -- consume that response on the first
+      // call instead of re-fetching, then drop it so the later poll
+      // (startPollingForNewSteps) and any model re-load always do a fresh
+      // no-store fetch of the moving pointer.
+      let payload;
+      const early = window.__latestRunPromise;
+      if (early && early.model === model) {
+        delete window.__latestRunPromise;
+        payload = await early.promise;
+      } else {
+        const res = await fetch(MODELS[model].latestPointer, { cache: "no-store" });
+        if (!res.ok) throw new Error(`no published run for ${model} (HTTP ${res.status})`);
+        payload = await res.json();
+      }
+      const { cycle_time, steps, expected_steps } = payload;
       if (!Array.isArray(steps) || steps.length === 0) {
         throw new Error(`latest.json for ${model} has no published steps`);
       }
-      return { cycleTime: cycle_time, steps };
+      return {
+        cycleTime: cycle_time,
+        steps,
+        expectedSteps: Array.isArray(expected_steps) ? expected_steps : fallbackExpectedSteps(cycle_time),
+      };
+    }
+
+    // Lead hours a cycle targets, mirroring ecmwf_ifs.target_steps_for_cycle
+    // (6-hourly to 240h for 00Z/12Z, to 144h for 06Z/18Z). Only a fallback
+    // for latest.json files written before the scheduler started including
+    // "expected_steps".
+    function fallbackExpectedSteps(cycleTime) {
+      const hour = new Date(cycleTime + "Z").getUTCHours();
+      const max = hour === 0 || hour === 12 ? 240 : 144;
+      return Array.from({ length: max / 6 + 1 }, (_, i) => i * 6);
+    }
+
+    // Draws one tick per expected forecast step under the slider: light if
+    // that step is published, red if not yet. Clicking a published tick
+    // jumps the slider/map to it; the visible step's tick is highlighted.
+    // The slider runs over "slots" -- one per expected forecast hour,
+    // published or not -- so its thumb sits exactly over a tick. These
+    // helpers translate between slots and indexes into activeSteps (the
+    // published steps, which is what the rest of the app works in).
+    function stepSlotHours(state) {
+      const published = state.activeSteps.map((s) => s.step_hours);
+      return [...new Set([...(state.expectedSteps || []), ...published])].sort((a, b) => a - b);
+    }
+
+    function slotOfIndex(state, index) {
+      const step = state.activeSteps[index];
+      return step ? stepSlotHours(state).indexOf(step.step_hours) : 0;
+    }
+
+    // Snaps `slot` to a published one: a single-slot move (arrow key) goes
+    // on to the next published slot in that direction so keyboard stepping
+    // can't get stuck against a gap; bigger jumps (dragging) take the
+    // nearest. Returns an index into activeSteps.
+    function indexOfSlot(state, slot, prevSlot) {
+      const hours = stepSlotHours(state);
+      const published = state.activeSteps.map((s, i) => [hours.indexOf(s.step_hours), i]);
+      const dir = Math.abs(slot - prevSlot) === 1 ? Math.sign(slot - prevSlot) : 0;
+      let pool = dir ? published.filter(([sl]) => (sl - slot) * dir >= 0) : [];
+      if (!pool.length) pool = published;
+      return pool.reduce((best, cur) => (Math.abs(cur[0] - slot) < Math.abs(best[0] - slot) ? cur : best))[1];
+    }
+
+    function setSliderSlot(slot) {
+      const slider = document.getElementById("time-slider");
+      slider.value = String(slot);
+      slider.dataset.slot = String(slot);
+    }
+
+    function renderStepTicks(state, currentIndex = state.visibleStepIndex) {
+      const box = document.getElementById("time-ticks");
+      const published = new Map(state.activeSteps.map((s, i) => [s.step_hours, i]));
+      const expected = stepSlotHours(state);
+      const span = Math.max(expected.length - 1, 1);
+      box.replaceChildren(...expected.map((hours, i) => {
+        const idx = published.get(hours);
+        const tick = document.createElement("button");
+        tick.type = "button";
+        tick.className = "step-tick";
+        tick.style.left = `calc(8px + (100% - 16px) * ${i / span})`;
+        if (idx === undefined) {
+          tick.classList.add("is-missing");
+          tick.disabled = true;
+          tick.title = `T+${hours}h: not published yet`;
+        } else {
+          if (idx === currentIndex) tick.classList.add("is-current");
+          tick.title = `T+${hours}h: published`;
+          tick.onclick = () => {
+            const slider = document.getElementById("time-slider");
+            slider.value = String(i);
+            slider.dispatchEvent(new Event("input", { bubbles: true }));
+            slider.dispatchEvent(new Event("change", { bubbles: true }));
+          };
+        }
+        return tick;
+      }));
     }
 
     // Removes every cached layer for every step of `state`'s model, and
@@ -1519,6 +1996,20 @@
           zarrVersion: ZARR_VERSION,
           bounds: GRID_BOUNDS,
           latIsAscending: GRID_LAT_ASCENDING,
+          // 2026-11-16 (uint8 stores): the quantized stores carry missing
+          // data as CF _FillValue 255 (NaN sentinel), but the zarr array's
+          // own fill_value is 0, and for non-float dtypes @carbonplan/
+          // zarr-layer falls back to that array fill_value as its "missing"
+          // marker -- it never reads the _FillValue attribute (confirmed
+          // against the esm.sh 0.12.1 source's fill/transform plumbing).
+          // Without pinning it here, every quantized-zero background cell
+          // decoded as missing (tooltip rows vanished vs the float32
+          // stores), and a 255 sentinel decoded as 255/254 ~= 1.004,
+          // rendering as a saturated full-opacity blob and querying as
+          // "100%". 255 can never equal a real float32 probability in
+          // [0,1], so this is inert on the float32 stores production still
+          // serves while the pipeline rolls over.
+          fillValue: 255,
           clim: [0, 1],
           // Two identical stops: customFrag (below) is what actually
           // varies alpha by probability, so the colormap texture itself
@@ -1576,6 +2067,7 @@
           },
         });
         map.addLayer(layer);
+        raiseFrontLines(); // keep the optional front lines above the newly added raster layer
         stepLayers.set(cls, layer);
       }
       modelState.layersByStep.set(index, stepLayers);
@@ -1977,16 +2469,20 @@
         if (result.cycleTime !== modelState.activeCycleTime) return; // new cycle -- next reload picks it up
         if (result.steps.length <= modelState.activeSteps.length) return; // nothing new yet
         modelState.activeSteps = result.steps;
+        modelState.expectedSteps = result.expectedSteps;
         if (modelState.key !== primaryModel) return; // steps updated; no shared UI to touch
-        if (document.getElementById("time-control").style.display === "none") {
+        if (document.getElementById("time-slider").disabled) {
           // This cycle just went from "only step 0 published" to having a
           // real range -- safe to run full setup (which resets slider.value
           // to 0) since step 0 is the only thing that's ever been on screen.
           setupTimeSlider();
         } else {
-          document.getElementById("time-slider").max = String(modelState.activeSteps.length - 1);
+          document.getElementById("time-slider").max = String(stepSlotHours(modelState).length - 1);
+          setSliderSlot(slotOfIndex(modelState, Math.max(modelState.visibleStepIndex, 0)));
           updateMaxLeadLabel();
+          renderStepTicks(modelState);
         }
+        refreshFrontLines(); // the on-screen step's entry may have gained a fronts file
       }, POLL_NEW_STEPS_MS);
     }
 
@@ -1994,16 +2490,25 @@
       const primaryState = modelStates.get(primaryModel);
       const control = document.getElementById("time-control");
       const slider = document.getElementById("time-slider");
+      const playButton = document.getElementById("play-button");
+      control.style.display = "block";
+      renderStepTicks(primaryState, 0);
       if (primaryState.activeSteps.length <= 1) {
-        // Nothing meaningful to slide over (e.g. a 06Z/18Z cycle that's
-        // only gotten through step 0 so far) -- hide rather than show a
-        // slider (and play button) that can't move.
-        control.style.display = "none";
+        // Nothing to slide over yet (e.g. a cycle that's only gotten
+        // through one step so far) -- keep the control visible so the tick
+        // strip shows which steps are still missing, but disable the
+        // slider and play button since they can't move.
+        slider.disabled = true;
+        playButton.disabled = true;
+        slider.max = String(stepSlotHours(primaryState).length - 1);
+        setSliderSlot(slotOfIndex(primaryState, 0));
+        updateMaxLeadLabel();
         return;
       }
-      control.style.display = "block";
-      slider.max = String(primaryState.activeSteps.length - 1);
-      slider.value = "0";
+      slider.disabled = false;
+      playButton.disabled = false;
+      slider.max = String(stepSlotHours(primaryState).length - 1);
+      setSliderSlot(slotOfIndex(primaryState, 0));
       updateMaxLeadLabel();
       // Reassigning oninput (rather than addEventListener, which would
       // stack a new listener every model load) since loadModelData() can
@@ -2029,7 +2534,7 @@
       // been still for SHOW_STEP_DEBOUNCE_MS.
       slider.oninput = (e) => {
         if (isPlaying) stopPlayback(); // manual scrub takes over from autoplay
-        const index = Number(e.target.value);
+        const index = snapSliderToPublished(e.target);
         previewStepLabel(index);
         if (pendingShowStepTimer !== null) clearTimeout(pendingShowStepTimer);
         pendingShowStepTimer = setTimeout(() => {
@@ -2049,8 +2554,17 @@
           clearTimeout(pendingShowStepTimer);
           pendingShowStepTimer = null;
         }
-        globalShowStep(Number(e.target.value));
+        globalShowStep(snapSliderToPublished(e.target));
       };
+    }
+
+    // Reads the slider's slot, snaps it to a published step (moving the
+    // thumb if it landed on a gap), and returns that step's index.
+    function snapSliderToPublished(slider) {
+      const state = modelStates.get(primaryModel);
+      const index = indexOfSlot(state, Number(slider.value), Number(slider.dataset.slot ?? 0));
+      setSliderSlot(slotOfIndex(state, index));
+      return index;
     }
 
     // Works around a confirmed @carbonplan/zarr-layer bug (upstream, not
@@ -2112,9 +2626,10 @@
       state.activeCycleTime = null; // refreshMeta() reads this as "loading…"
       refreshMeta();
       try {
-        const { cycleTime, steps } = await resolveLatestRun(model);
+        const { cycleTime, steps, expectedSteps } = await resolveLatestRun(model);
         state.activeCycleTime = cycleTime;
         state.activeSteps = steps;
+        state.expectedSteps = expectedSteps;
         if (model === primaryModel) {
           document.getElementById("time-init").textContent = `IFS Initialization ${formatHumanUTC(cycleTime)}`;
           setupTimeSlider();
@@ -2217,6 +2732,7 @@
     }
 
     buildClassToggles();
+    setupFrontLinesToggle();
     buildModelToggles();
     buildLegend();
     setupPlayButton();
@@ -2246,6 +2762,23 @@
       e.target.textContent = hidden ? "Hide" : "Show";
     });
     map.on("click", updateClickTooltip);
+    // 2026-11-16 (startup-latency pass): data used to start inside the
+    // "load" handler below, which MapLibre only fires once the style's ~40
+    // glyph PBFs and first basemap tiles have finished (~2 MB the zarr
+    // layers never touch). "style.load" is the earliest event that makes
+    // map.addLayer() legal, so the whole loadModelData pipeline (latest.json
+    // already warm from the head script, zarr.json warmed too) runs as soon
+    // as the style JSON is parsed. Layer order is unchanged -- these layers
+    // are still appended without a beforeId, on top of the basemap.
+    // isStyleLoaded() covers the (theoretical -- this module runs to
+    // completion synchronously after the map is constructed) race where the
+    // style finished before this line registered the listener.
+    function startDataLayers() {
+      primaryModel = pickPrimaryModel();
+      loadModelData(primaryModel);
+    }
+    if (map.isStyleLoaded()) startDataLayers();
+    else map.once("style.load", startDataLayers);
     map.on("load", () => {
       // 2026-08-21: globe view (per Taylor -- see
       // https://hazard.degreeday.org/?layer=wildfire for the reference
@@ -2257,10 +2790,10 @@
       // fine since it's before this line, but map.on("load", ...) itself
       // never even got registered) -- so the page silently never loaded
       // any data at all, not just "no globe". Calling it inside the
-      // "load" event handler is the fix.
+      // "load" event handler is the fix. (The data start moved to
+      // "style.load" above -- 2026-11-16 -- but setProjection deliberately
+      // stays here on the later, fully-loaded event.)
       map.setProjection({ type: "globe" });
-      primaryModel = pickPrimaryModel();
-      loadModelData(primaryModel);
     });
   </script>
 </body>

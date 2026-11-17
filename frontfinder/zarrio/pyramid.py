@@ -20,6 +20,7 @@ topozarr's `layer_hints` API lands and this gets upgraded later -- re-check
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -53,6 +54,42 @@ CRS = "EPSG:4326"  # global IFS lat/lon grid; zarr-layer reprojects client-side
 # chunk this library can produce -- target_chunk_bytes below is set to hit
 # that floor exactly.
 SMALL_CHUNK_BYTES = 64 * 1024  # 128*128 float32 cells exactly hits the floor
+
+# Packed uint8 probability grids (2026-11-16). Class probabilities are
+# float32 on the wire, but zstd compresses them badly: one level-0 shard per
+# class was ~3.27 MB, and first paint pulls ~7 of them. Rounding to uint8 is
+# visually lossless here -- the viewer's display bins are 0.1 wide and it
+# discards below ~0.01 -- and re-encodes ~35x smaller (measured: 94 KB vs
+# 3.27 MB on a real shard).
+#
+# `scale_factor`/`add_offset`/`_FillValue` are plain CF packing attrs on each
+# served-class array; @carbonplan/zarr-layer reads them straight out of
+# `getLevelMetadata`/consolidated metadata and unpacks client-side (standard
+# CF convention: value = packed * scale_factor + add_offset). Valid
+# probabilities are packed to 0..254 with scale_factor 1/254, so max abs
+# error is 0.5/254 = 0.00197 (well under the <= 0.004 budget and half the
+# error of 1/255), and 1.0 still round-trips exactly. 255 is reserved as the
+# uint8 NaN sentinel (`_FillValue`) so NaNs stay distinguishable from a real
+# 1.0 -- with scale_factor 1/255 that sentinel would collide with 255 and
+# force clipping 1.0 down to 254, wasting a code point and adding error
+# exactly at the most visible end of the ramp. Downsampling (topozarr's mean
+# resampling) still runs on the float32 grid; packing happens only at write
+# time, after every pyramid level is built.
+PACKED_DTYPE = np.dtype(np.uint8)
+PACKED_SCALE_FACTOR = 1.0 / 254.0
+PACKED_ADD_OFFSET = 0.0
+PACKED_FILL_VALUE = 255
+
+# 2026-11-16: packing is OPT-IN on the live write path. The production
+# webapp (webapp/index.html) predates the uint8 handling in webapp/dev/ --
+# it doesn't pin zarr-layer's fillValue to the 255 sentinel and its tooltip
+# drops decoded-zero rows -- so flipping every new run to uint8 before that
+# client is promoted would show a saturated blob at any NaN and lose
+# zero-probability tooltip rows. Set this env var (or pass pack_uint8=True)
+# once the dev viewer has been promoted. Offline packing for the /dev data
+# tree (scripts/refresh_dev_data.sh) is unaffected: it calls
+# write_quantized_datatree directly.
+PACK_UINT8_ENV = "FRONTFINDER_PACK_UINT8"
 
 # Fixed per-class color styling (colormap name + [min, max] clim), embedded
 # as zarr variable attrs since the installed topozarr version doesn't yet
@@ -169,8 +206,109 @@ def build_front_pyramid(fields: FrontFields, manifest: ModelManifest, n_levels: 
     )
 
 
-def write_front_pyramid(pyramid: Pyramid, store_path: str) -> None:
+def _served_classes_for_level(node: xr.DataTree) -> list[str]:
+    """The served-class names carried in a pyramid level's group attrs."""
+    served = node.attrs.get("served_classes") or node.to_dataset().attrs.get("served_classes")
+    if not served:
+        raise ValueError(f"pyramid level {node.path!r} has no served_classes attrs")
+    return [str(cls) for cls in served]
+
+
+def _pack_probability_variable(var: xr.DataArray) -> xr.DataArray:
+    """Round one float32 [0, 1] probability field onto the packed uint8 grid.
+
+    Clips before casting so a stray out-of-range value lands on 0/254
+    instead of wrapping around in the uint8 cast, and fills NaN with
+    PACKED_FILL_VALUE (255) -- see the PACKED_* comment at the top of this
+    module for why 1/254 + a 255 sentinel is the encoding used. All
+    operations stay lazy on dask-backed (downsampled) fields.
+    """
+    packed = (
+        (var.clip(0.0, 1.0) * 254.0)
+        .round()
+        .fillna(float(PACKED_FILL_VALUE))
+        .astype(PACKED_DTYPE)
+    )
+    attrs = dict(var.attrs)
+    attrs.update(
+        scale_factor=PACKED_SCALE_FACTOR,
+        add_offset=PACKED_ADD_OFFSET,
+        _FillValue=PACKED_FILL_VALUE,
+    )
+    packed.attrs = attrs
+    return packed
+
+
+def quantize_datatree(datatree: xr.DataTree, base_encoding: dict | None = None) -> dict:
+    """Pack every served-class variable at every pyramid level to uint8, in place.
+
+    Mutates the served-class data vars of `datatree` and returns the
+    `datatree.to_zarr(..., encoding=...)` mapping. Coordinates and the
+    pyramid's CRS variable (lat/lon/spatial_ref) are left untouched -- only
+    the actual served-class grids are packed.
+
+    Shared by write_front_pyramid (fresh pyramids straight out of topozarr)
+    and scripts/requantize_store.py (already-published float32 stores), so
+    both paths get byte-identical packing/metadata. `base_encoding` is
+    topozarr's per-level `chunks`/`shards` mapping for a fresh pyramid; when
+    omitted (the requantize path) the layout is taken from each variable's
+    own read-time `.encoding`.
+
+    2026-11-16: deliberately not specifying a compressor here. The current
+    default (zstd level 0, which zstd itself treats as "default" == level 3)
+    produced byte-identical output to an explicit ZstdCodec(level=3) on a
+    real quantized store -- 1,003,437 bytes either way for a whole step --
+    with identical decode speed, so the explicit level is pure noise.
+    """
+    encoding: dict[str, dict[str, dict]] = {}
+    for path in datatree.groups:
+        if path in ("", "/"):
+            continue
+        node = datatree[path]
+        level_encoding: dict[str, dict] = {}
+        for cls in _served_classes_for_level(node):
+            var = node[cls]
+            base = (base_encoding or {}).get(path, {}).get(cls, {})
+            if not base:
+                base = var.encoding
+            # Keep topozarr's/the source store's existing chunk + shard
+            # layout; zarr defaults the rest (zstd inner codec, bytes codec).
+            level_encoding[cls] = {k: base[k] for k in ("chunks", "shards") if k in base}
+            # Packing in place is fine: both callers build (or load) the tree
+            # for a one-shot write and never hand it on.
+            node[cls] = _pack_probability_variable(var)
+        if level_encoding:
+            encoding[path] = level_encoding
+    return encoding
+
+
+def write_quantized_datatree(
+    datatree: xr.DataTree, store_path: str, base_encoding: dict | None = None
+) -> None:
+    """Write a pyramid datatree with every served class uint8-packed, then
+    consolidate metadata (see write_front_pyramid's docstring for why the
+    explicit consolidate call matters)."""
+    encoding = quantize_datatree(datatree, base_encoding)
+    datatree.to_zarr(store_path, encoding=encoding, mode="w")
+    zarr.consolidate_metadata(store_path)
+
+
+def pack_uint8_enabled(pack_uint8: bool | None = None) -> bool:
+    """Whether a written store should be uint8-packed: an explicit
+    `pack_uint8` wins, else the FRONTFINDER_PACK_UINT8 env var (default off)."""
+    if pack_uint8 is None:
+        pack_uint8 = os.environ.get(PACK_UINT8_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+    return pack_uint8
+
+
+def write_front_pyramid(pyramid: Pyramid, store_path: str, pack_uint8: bool | None = None) -> None:
     """Write a topozarr pyramid to a zarr v3 store.
+
+    float32 by default (unchanged behaviour). With `pack_uint8=True` -- or
+    `pack_uint8=None` and the FRONTFINDER_PACK_UINT8 env var set to a truthy
+    value -- every served-class variable at every level is uint8-packed with CF
+    scale_factor/add_offset/_FillValue attrs (see the PACKED_* comment);
+    lat/lon/spatial_ref are written unchanged either way.
 
     2026-08-22: followed by an explicit `zarr.consolidate_metadata()` call.
     `datatree.to_zarr` already writes a `consolidated_metadata` block on
@@ -191,5 +329,8 @@ def write_front_pyramid(pyramid: Pyramid, store_path: str) -> None:
     metadata round-trips into the one root `zarr.json` fetch it makes
     anyway.
     """
+    if pack_uint8_enabled(pack_uint8):
+        write_quantized_datatree(pyramid.datatree, store_path, base_encoding=pyramid.encoding)
+        return
     pyramid.datatree.to_zarr(store_path, encoding=pyramid.encoding, mode="w")
     zarr.consolidate_metadata(store_path)

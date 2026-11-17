@@ -30,7 +30,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
-from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_MANIFEST  # MODEL_1702_MANIFEST -- see module docstring
+from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST  # MODEL_1702_MANIFEST -- see module docstring
 from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, IFSCycle, target_steps_for_cycle
 from frontfinder.inference.engine import KerasPredictor
 from frontfinder.scheduler.retention import prune_old_cache_files, prune_old_output_stores
@@ -162,12 +162,14 @@ def _cycles_after(after: tuple[str, int] | None, current: tuple[str, int]) -> li
 
 def build_run_configs(model_dir: str) -> list[ModelRunConfig]:
     return [
-        # 2026-10-08: replaced theta-e_uv_q (_best_loss.keras) as the served
-        # model. Its manifest is still in config/manifests.py.
+        # 2026-11-17: replaced nbs_square_dilation_trof_tt_no_inst (which
+        # replaced theta-e_uv_q on 2026-10-08) as the served model -- same
+        # network retrained without 2 m dewpoint. Earlier manifests are still
+        # in config/manifests.py.
         ModelRunConfig(
-            manifest=NBS_SQUARE_DILATION_TROF_TT_MANIFEST,
+            manifest=NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST,
             predictor=KerasPredictor(
-                os.path.join(model_dir, NBS_SQUARE_DILATION_TROF_TT_MANIFEST.weights_filename)
+                os.path.join(model_dir, NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST.weights_filename)
             ),
         ),
         # model_1702 disabled -- see module docstring for why. Re-add once
@@ -232,6 +234,28 @@ def main(argv: list[str] | None = None) -> int:
             "very large number to effectively disable pruning."
         ),
     )
+    parser.add_argument(
+        "--front-lines",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "also derive smooth front lines (splines) from each published step's "
+            "probabilities, written as <store>.fronts.geojson next to the zarr store "
+            "and listed in latest.json, for the webapp's optional 'Front lines' "
+            "overlay (default: on; --no-front-lines to skip). A failure here never "
+            "affects inference or publishing."
+        ),
+    )
+    parser.add_argument(
+        "--front-line-threshold",
+        type=float,
+        default=None,
+        help=(
+            "summed-probability threshold above which a probability band becomes a "
+            "front line (default: 0.25). The probabilities "
+            "are uncalibrated; tune this against what the overlay looks like."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -277,7 +301,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         cycle_date, run_hour = most_recent_completed_cycle(datetime.now(timezone.utc), args.publish_lag_hours)
 
-    results = run_cycle(run_configs, source, cycle_date, run_hour, args.output_root)
+    results = run_cycle(
+        run_configs,
+        source,
+        cycle_date,
+        run_hour,
+        args.output_root,
+        front_lines=args.front_lines,
+        front_line_threshold=args.front_line_threshold,
+    )
     logger.info(
         "cycle %s-%02dZ complete: %s",
         cycle_date, run_hour, {name: len(paths) for name, paths in results.items()},

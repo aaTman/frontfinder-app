@@ -30,6 +30,42 @@ move. The slider is hidden when a cycle only has one published step so far
 (e.g. a 06Z/18Z run, or a 00Z/12Z run the timer caught mid-publish before
 its longer lead times were available).
 
+## Front lines overlay (optional)
+
+An **Overlays -> Front lines** checkbox (off by default; `?lines=1` opens the
+page with it on) draws smooth front lines over the probability layers. It is
+independent of the zarr layers: its own GeoJSON source plus five layers
+(`front-lines-casing`, `-solid`, `-dashed`, and two symbol layers), kept above
+the raster layers, and it never touches their visibility, opacity or caching.
+
+Data: each `latest.json` step entry may carry `"fronts": "<cycle>_f<step>.fronts.geojson"`,
+written by `frontfinder/postprocess/front_lines.py` (see the top-level README).
+The viewer fetches the on-screen step's file (primary model only; the last 12
+are kept in memory) when the box is on and a step is revealed, and again when
+new steps are polled in. A step with no `fronts` shows "(none for this step)".
+The class checkboxes apply to the lines and symbols too. Lines are colored like
+the probability layers; troughs and drylines are dashed.
+
+**Symbols** follow the WPC convention: cold = triangles, warm = semicircles,
+occluded = both alternating on one side, stationary = blue triangles and orange
+semicircles alternating on opposite sides. Each feature is split into one
+LineString per part, tagged `cls` and `side` (`left`/`right` of the line walking
+first point to last, from `summary.symbol_sides`); a symbol is drawn on that
+side, pointing off the line. They are repeating tiles drawn on a canvas
+(`drawSymbolTile`, patterns in `lib.js` `FRONT_SYMBOL_PATTERNS`), registered as
+map images, and placed with `symbol-placement: line`. `symbol-spacing` is not
+data-driven, so each tile width (26 px for cold/warm, 52 px for
+occluded/stationary) has its own layer; `icon-keep-upright` is off so a tile's
+"up" always stays the line's left. Longitudes are never cut at 180 degrees (a
+front can read 175, 185), which MapLibre draws as one line.
+
+`lib.js` holds the pure parts (`frontLinesUrl`, `withLineClasses`,
+`lineColorExpression`, `lineFilter`, the symbol patterns and filters), covered by
+`lib.test.js`. The
+map-side code in `index.html` was checked in headless Chromium (globe
+projection, slider, class toggles, on/off), which caught a bug the unit tests
+cannot: MapLibre rejects `zoom` inside a `+` expression.
+
 ## Colors, bin math, and tests (`lib.js`)
 
 2026-08-21: `CLASS_STYLE` (the per-class hex colors), the `FRONT_*` bin
