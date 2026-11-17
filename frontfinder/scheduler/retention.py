@@ -38,8 +38,8 @@ _STORE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T\d{2}Z(?:_f\d{3})?\.zarr$")
 _CACHE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_\d{2}z_.*\.grib2$")
 # Per-step front-line GeoJSON and symbol-orientation sidecars written next to
 # the zarr stores by postprocess/front_lines.py (`<store name minus .zarr>` plus
-# `.fronts.geojson` / `.fields.npz`).
-_FRONTS_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T\d{2}Z(?:_f\d{3})?\.(?:fronts\.geojson|fields\.npz)$")
+# `.fronts.geojson` / `.fields.npz` / `.probs.npz`).
+_FRONTS_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T\d{2}Z(?:_f\d{3})?\.(?:fronts\.geojson|fields\.npz|probs\.npz)$")
 
 
 def _parse_date(name: str, pattern: re.Pattern) -> date | None:
@@ -57,8 +57,8 @@ def prune_old_output_stores(output_root: str, max_age_days: int, now: datetime) 
     store name encodes a cycle date older than `max_age_days`.
 
     Also deletes the matching per-step `<store>.fronts.geojson` files (the
-    webapp's optional front-line overlay) and `<store>.fields.npz` sidecars
-    by the same cutoff.
+    webapp's optional front-line overlay) and the `<store>.fields.npz` /
+    `<store>.probs.npz` sidecars by the same cutoff.
 
     Never touches `latest.json` (the webapp's pointer file -- see
     run_cycle.py's `_write_latest_pointer`) or anything whose name doesn't

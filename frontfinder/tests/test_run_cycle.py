@@ -440,3 +440,49 @@ def test_rebuild_orientation_fields_fills_in_a_cycle_published_without_them(tiny
     ]
     assert front_lines.rebuild_orientation_fields(str(tmp_path), NBS.name, tiny_source) == 0  # nothing left to do
     assert front_lines.rebuild_orientation_fields(str(tmp_path), "not_a_model", tiny_source) == 0
+
+
+def _nbs_front_lines_config():
+    from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_MANIFEST as NBS
+
+    class NbsPredictor:
+        def predict_batch(self, patches):
+            n, h, w, _ = patches.shape
+            out = np.random.default_rng(1).random((n, h, w, len(NBS.all_classes))).astype(np.float32)
+            return out / out.sum(axis=-1, keepdims=True)
+
+    return NBS, [ModelRunConfig(manifest=NBS, predictor=NbsPredictor(), patch_size=64, overlap=16, n_pyramid_levels=2)]
+
+
+def test_run_cycle_packing_with_front_lines_saves_exact_float32_probabilities(tiny_source, tmp_path, monkeypatch):
+    # Packing quantizes the store, and the front lines are derived from the store
+    # on disk -- so the exact float32 grids must be saved beside it first.
+    monkeypatch.setenv("FRONTFINDER_PACK_UINT8", "1")
+    NBS, configs = _nbs_front_lines_config()
+    run_cycle(configs, tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0, 6), front_lines=True)
+    model_dir = tmp_path / NBS.name
+    assert sorted(p.name for p in model_dir.glob("*.probs.npz")) == [
+        "2026-08-19T12Z_f000.probs.npz",
+        "2026-08-19T12Z_f006.probs.npz",
+    ]
+    ds = xr.open_zarr(str(model_dir / "2026-08-19T12Z_f000.zarr"), group="0", consolidated=False, mask_and_scale=False)
+    assert ds["cold"].dtype == np.uint8  # the store really is packed
+    with np.load(model_dir / "2026-08-19T12Z_f000.probs.npz") as z:
+        assert z["CF"].dtype == np.float32
+        # sidecar holds exact values; the packed store is within the packing error of them
+        decoded = ds["cold"].values.astype(np.float64) / 254.0
+        assert np.abs(decoded - z["CF"]).max() <= 0.5 / 254 + 1e-6
+        assert not np.array_equal(decoded, z["CF"])
+
+
+def test_run_cycle_without_packing_writes_no_probabilities_sidecar(tiny_source, tmp_path, monkeypatch):
+    monkeypatch.delenv("FRONTFINDER_PACK_UINT8", raising=False)
+    NBS, configs = _nbs_front_lines_config()
+    run_cycle(configs, tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0,), front_lines=True)
+    assert not list((tmp_path / NBS.name).glob("*.probs.npz"))
+
+
+def test_run_cycle_packing_without_front_lines_writes_no_probabilities_sidecar(tiny_source, tmp_path, monkeypatch):
+    monkeypatch.setenv("FRONTFINDER_PACK_UINT8", "1")
+    run_cycle(_model_1702_config(), tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0,))
+    assert not list((tmp_path / "model_1702").glob("*.probs.npz"))

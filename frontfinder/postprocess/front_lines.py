@@ -65,6 +65,7 @@ FRONT_LINE_THRESHOLD = 0.25
 FRONT_MATCH_THRESHOLD = 0.5
 FRONTS_SUFFIX = ".fronts.geojson"
 FIELDS_SUFFIX = ".fields.npz"
+PROBS_SUFFIX = ".probs.npz"
 
 # Channel names (see ModelManifest.channel_names) the symbol sides are chosen
 # from, keyed by the name `splines.extract_fronts` takes them under.
@@ -97,6 +98,41 @@ def fields_filename(store_name: str) -> str:
     if not store_name.endswith(".zarr"):
         raise ValueError(f"not a zarr store name: {store_name!r}")
     return store_name[: -len(".zarr")] + FIELDS_SUFFIX
+
+
+def probabilities_filename(store_name: str) -> str:
+    """`2026-10-31T06Z_f006.zarr` -> `2026-10-31T06Z_f006.probs.npz`."""
+    if not store_name.endswith(".zarr"):
+        raise ValueError(f"not a zarr store name: {store_name!r}")
+    return store_name[: -len(".zarr")] + PROBS_SUFFIX
+
+
+def save_probabilities_sidecar(level0: xr.Dataset, path: str) -> None:
+    """Saves the exact float32 level-0 class grids of a store about to be
+    uint8-packed, so the front lines can still be derived from them.
+
+    A packed store only holds the probabilities to within 1/254, which is
+    enough to draw but moves the spline crests a little and can add or drop a
+    short front near the threshold. `load_probabilities` prefers this sidecar,
+    so with packing on the lines come out exactly as they did from float32
+    stores. Call it BEFORE the store is written (packing mutates the tree).
+    """
+    arrays = {
+        code: np.asarray(level0[cls].values, dtype=np.float32) for cls, code in CLASS_CODES.items() if cls in level0
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        np.savez_compressed(f, lat=np.asarray(level0["lat"].values), lon=np.asarray(level0["lon"].values), **arrays)
+    os.replace(tmp, path)
+
+
+def _load_probabilities_sidecar(path: str) -> xr.Dataset:
+    with np.load(path) as z:
+        coords = {"latitude": z["lat"], "longitude": z["lon"]}
+        return xr.Dataset(
+            {code: (("latitude", "longitude"), z[code]) for code in CLASS_CODES.values() if code in z.files},
+            coords=coords,
+        )
 
 
 def extract_orientation_fields(
@@ -149,8 +185,20 @@ def load_orientation_fields(path: str) -> dict[str, xr.DataArray]:
 def load_probabilities(store_path: str) -> xr.Dataset:
     """Reads a published store's full-resolution (level 0) class probabilities
     in the layout `postprocess.splines` expects: one variable per front type
-    code (`CF`, `WF`, ...), dims (latitude, longitude)."""
+    code (`CF`, `WF`, ...), dims (latitude, longitude).
+
+    Uses the `<store>.probs.npz` float32 sidecar when there is one (stores
+    written with uint8 packing on -- see `save_probabilities_sidecar`),
+    otherwise the store itself."""
+    sidecar = os.path.join(os.path.dirname(store_path), probabilities_filename(os.path.basename(store_path)))
+    if os.path.exists(sidecar):
+        try:
+            return _load_probabilities_sidecar(sidecar)
+        except Exception:
+            logger.exception("unreadable probabilities sidecar %s -- using the store's own values", sidecar)
     ds = xr.open_zarr(store_path, group="0", consolidated=False, zarr_format=3)
+    if any("scale_factor" in ds[cls].encoding for cls in CLASS_CODES if cls in ds):
+        logger.warning("%s is uint8-packed and has no probabilities sidecar -- front lines use the packed values", store_path)
     present = {cls: code for cls, code in CLASS_CODES.items() if cls in ds}
     if not present:
         raise ValueError(f"{store_path} has none of the front classes {sorted(CLASS_CODES)}")

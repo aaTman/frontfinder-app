@@ -293,6 +293,14 @@ def write_quantized_datatree(
     zarr.consolidate_metadata(store_path)
 
 
+def pack_uint8_enabled(pack_uint8: bool | None = None) -> bool:
+    """Whether a written store should be uint8-packed: an explicit
+    `pack_uint8` wins, else the FRONTFINDER_PACK_UINT8 env var (default off)."""
+    if pack_uint8 is None:
+        pack_uint8 = os.environ.get(PACK_UINT8_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+    return pack_uint8
+
+
 def write_front_pyramid(pyramid: Pyramid, store_path: str, pack_uint8: bool | None = None) -> None:
     """Write a topozarr pyramid to a zarr v3 store.
 
@@ -321,9 +329,7 @@ def write_front_pyramid(pyramid: Pyramid, store_path: str, pack_uint8: bool | No
     metadata round-trips into the one root `zarr.json` fetch it makes
     anyway.
     """
-    if pack_uint8 is None:
-        pack_uint8 = os.environ.get(PACK_UINT8_ENV, "").strip().lower() in ("1", "true", "yes", "on")
-    if pack_uint8:
+    if pack_uint8_enabled(pack_uint8):
         write_quantized_datatree(pyramid.datatree, store_path, base_encoding=pyramid.encoding)
         return
     pyramid.datatree.to_zarr(store_path, encoding=pyramid.encoding, mode="w")
