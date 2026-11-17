@@ -1,10 +1,14 @@
 import json
+import os
 
 import numpy as np
 import pytest
 
 from frontfinder.config.manifests import MODEL_1702_MANIFEST
 from frontfinder.zarrio.pyramid import (
+    PACKED_ADD_OFFSET,
+    PACKED_FILL_VALUE,
+    PACKED_SCALE_FACTOR,
     FrontFields,
     build_front_pyramid,
     build_level0_dataset,
@@ -20,6 +24,31 @@ def small_fields():
     probs = {
         cls: rng.random((64, 64)).astype(np.float32) for cls in MODEL_1702_MANIFEST.served_classes
     }
+    return FrontFields(
+        probabilities=probs,
+        lat=lat,
+        lon=lon,
+        valid_time="2026-08-19T12:00:00",
+        cycle_time="2026-08-19T12:00:00",
+    )
+
+
+@pytest.fixture
+def fields_with_extremes():
+    # Deliberately puts 0, 1, 0.5 and NaN at known level-0 cells: the packed
+    # uint8 grid (scale_factor 1/254 + 255 NaN sentinel) must round-trip the
+    # endpoints exactly, preserve NaNs, and stay within the 0.004 budget
+    # everywhere else.
+    lat = np.linspace(25.0, 56.75, 64)
+    lon = np.linspace(228.0, 299.75, 64)
+    rng = np.random.default_rng(7)
+    probs = {
+        cls: rng.random((64, 64)).astype(np.float32) for cls in MODEL_1702_MANIFEST.served_classes
+    }
+    probs["cold"][0, 0] = 0.0
+    probs["cold"][0, 1] = 1.0
+    probs["cold"][0, 2] = 0.5
+    probs["cold"][0, 3] = np.nan
     return FrontFields(
         probabilities=probs,
         lat=lat,
@@ -140,14 +169,122 @@ def test_write_front_pyramid_roundtrips_through_zarr(small_fields, tmp_path):
 
     pyramid = build_front_pyramid(small_fields, MODEL_1702_MANIFEST, n_levels=2)
     store_path = str(tmp_path / "test_pyramid.zarr")
-    write_front_pyramid(pyramid, store_path)
+    write_front_pyramid(pyramid, store_path, pack_uint8=True)
 
     reopened = xr.open_datatree(store_path, engine="zarr")
     lvl0 = reopened["0"].to_dataset()
+    # 2026-11-16: written as packed uint8 (scale_factor 1/254), so compare
+    # against the 0.004 quantization budget rather than 1e-5 float equality.
     np.testing.assert_allclose(
-        lvl0["cold"].values, small_fields.probabilities["cold"], atol=1e-5
+        lvl0["cold"].values, small_fields.probabilities["cold"], atol=0.004
     )
     assert lvl0["cold"].attrs["colormap"] == "blues"
+
+
+def test_write_front_pyramid_preserves_nan_and_endpoint_values(fields_with_extremes, tmp_path):
+    import xarray as xr
+
+    pyramid = build_front_pyramid(fields_with_extremes, MODEL_1702_MANIFEST, n_levels=2)
+    store_path = str(tmp_path / "test_pyramid.zarr")
+    write_front_pyramid(pyramid, store_path, pack_uint8=True)
+
+    # open_datatree defaults to mask_and_scale=True in the zarr backend, so
+    # this is exactly what the client-side decoder sees: float values after
+    # applying scale_factor/add_offset and masking _FillValue.
+    reopened = xr.open_datatree(store_path, engine="zarr")
+    for cls in MODEL_1702_MANIFEST.served_classes:
+        decoded = reopened["0"][cls].values
+        expected = fields_with_extremes.probabilities[cls]
+
+        # NaNs survive at exactly the same cells, rather than turning into a
+        # valid probability (the 255 sentinel's whole point).
+        np.testing.assert_array_equal(np.isnan(decoded), np.isnan(expected))
+
+        finite = np.isfinite(expected)
+        assert np.max(np.abs(decoded[finite] - expected[finite])) <= 0.004
+
+    cold = reopened["0"]["cold"].values
+    assert cold[0, 0] == 0.0
+    assert cold[0, 1] == 1.0  # 1.0 still has its own code point (254/254)
+    assert cold[0, 2] == 0.5  # 0.5 lands exactly on 127/254
+    assert np.isnan(cold[0, 3])
+
+
+def test_write_front_pyramid_packs_every_level_and_class_as_uint8(small_fields, tmp_path):
+    pyramid = build_front_pyramid(small_fields, MODEL_1702_MANIFEST, n_levels=3)
+    store_path = str(tmp_path / "test_pyramid.zarr")
+    write_front_pyramid(pyramid, store_path, pack_uint8=True)
+
+    for level in ("0", "1", "2"):
+        for cls in MODEL_1702_MANIFEST.served_classes:
+            with open(os.path.join(store_path, level, cls, "zarr.json")) as f:
+                metadata = json.load(f)
+            assert metadata["data_type"] == "uint8", f"{level}/{cls}"
+            assert metadata["attributes"]["scale_factor"] == pytest.approx(PACKED_SCALE_FACTOR)
+            assert metadata["attributes"]["add_offset"] == PACKED_ADD_OFFSET
+            assert metadata["attributes"]["_FillValue"] == PACKED_FILL_VALUE
+        # Non-probability vars keep their native dtypes.
+        with open(os.path.join(store_path, level, "lat", "zarr.json")) as f:
+            assert json.load(f)["data_type"] == "float64"
+        with open(os.path.join(store_path, level, "lon", "zarr.json")) as f:
+            assert json.load(f)["data_type"] == "float64"
+        with open(os.path.join(store_path, level, "spatial_ref", "zarr.json")) as f:
+            assert json.load(f)["data_type"] == "int64"
+
+
+def test_write_front_pyramid_consolidated_metadata_carries_packing_attrs(small_fields, tmp_path):
+    # The client reads scale_factor/add_offset out of the CONSOLIDATED
+    # metadata block, not the per-array zarr.json -- both must agree.
+    pyramid = build_front_pyramid(small_fields, MODEL_1702_MANIFEST, n_levels=2)
+    store_path = str(tmp_path / "test_pyramid.zarr")
+    write_front_pyramid(pyramid, store_path, pack_uint8=True)
+
+    with open(os.path.join(store_path, "zarr.json")) as f:
+        consolidated = json.load(f)["consolidated_metadata"]["metadata"]
+    for level in ("0", "1"):
+        entry = consolidated[f"{level}/cold"]
+        assert entry["data_type"] == "uint8"
+        assert entry["attributes"]["scale_factor"] == pytest.approx(PACKED_SCALE_FACTOR)
+        assert entry["attributes"]["add_offset"] == PACKED_ADD_OFFSET
+        assert entry["attributes"]["_FillValue"] == PACKED_FILL_VALUE
+
+
+def test_quantized_level0_shard_is_much_smaller_than_float32(tmp_path):
+    # A realistic sparse probability field: a coherent frontal ridge over a
+    # field of tiny non-zero floats (softmax outputs are never exactly 0, and
+    # those noisy mantissas are exactly what float32 zstd handles badly).
+    n = 512
+    lat = np.linspace(0.0, 63.0, n)
+    lon = np.linspace(200.0, 263.0, n)
+    rng = np.random.default_rng(2)
+    yy, xx = np.mgrid[0:n, 0:n]
+    ridge = np.exp(-((xx - 256) ** 2) / (2 * 30.0**2))
+    base = np.clip(ridge * 0.8 + rng.random((n, n)) * 0.004, 0.0, 1.0)
+    probs = {
+        cls: (base * (0.5 + 0.5 * rng.random((n, n)))).astype(np.float32)
+        for cls in MODEL_1702_MANIFEST.served_classes
+    }
+    fields = FrontFields(
+        probabilities=probs, lat=lat, lon=lon, valid_time="t", cycle_time="t"
+    )
+
+    packed_store = str(tmp_path / "packed.zarr")
+    write_front_pyramid(build_front_pyramid(fields, MODEL_1702_MANIFEST, n_levels=2), packed_store, pack_uint8=True)
+
+    float_store = str(tmp_path / "float.zarr")
+    float_pyramid = build_front_pyramid(fields, MODEL_1702_MANIFEST, n_levels=2)
+    float_pyramid.datatree.to_zarr(float_store, encoding=float_pyramid.encoding, mode="w")
+
+    def largest_level0_shard(store_path: str) -> int:
+        shard_dir = os.path.join(store_path, "0", "cold", "c")
+        sizes = [
+            os.path.getsize(os.path.join(root, name))
+            for root, _, names in os.walk(shard_dir)
+            for name in names
+        ]
+        return max(sizes)
+
+    assert largest_level0_shard(packed_store) < largest_level0_shard(float_store) * 0.5
 
 
 def test_write_front_pyramid_populates_consolidated_metadata(small_fields, tmp_path):
@@ -161,10 +298,33 @@ def test_write_front_pyramid_populates_consolidated_metadata(small_fields, tmp_p
     # entries (shape/chunk info), not just empty per-level placeholders.
     pyramid = build_front_pyramid(small_fields, MODEL_1702_MANIFEST, n_levels=2)
     store_path = str(tmp_path / "test_pyramid.zarr")
-    write_front_pyramid(pyramid, store_path)
+    write_front_pyramid(pyramid, store_path, pack_uint8=True)
 
     with open(f"{store_path}/zarr.json") as f:
         root = json.load(f)
     consolidated = root["consolidated_metadata"]["metadata"]
     assert "0/cold" in consolidated
     assert consolidated["0/cold"]["shape"] == [64, 64]
+
+
+def test_write_front_pyramid_is_float32_by_default(small_fields, tmp_path, monkeypatch):
+    # Packing is opt-in (see PACK_UINT8_ENV): until the dev viewer is promoted,
+    # the live write path must keep producing exactly what production serves.
+    import xarray as xr
+
+    monkeypatch.delenv("FRONTFINDER_PACK_UINT8", raising=False)
+    store_path = str(tmp_path / "default.zarr")
+    write_front_pyramid(build_front_pyramid(small_fields, MODEL_1702_MANIFEST, n_levels=2), store_path)
+    ds = xr.open_zarr(store_path, group="0", consolidated=False, mask_and_scale=False)
+    assert ds["cold"].dtype == np.float32
+    assert "scale_factor" not in ds["cold"].attrs
+
+
+def test_write_front_pyramid_env_var_opts_into_uint8(small_fields, tmp_path, monkeypatch):
+    import xarray as xr
+
+    monkeypatch.setenv("FRONTFINDER_PACK_UINT8", "1")
+    store_path = str(tmp_path / "env.zarr")
+    write_front_pyramid(build_front_pyramid(small_fields, MODEL_1702_MANIFEST, n_levels=2), store_path)
+    ds = xr.open_zarr(store_path, group="0", consolidated=False, mask_and_scale=False)
+    assert ds["cold"].dtype == np.uint8

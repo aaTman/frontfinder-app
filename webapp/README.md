@@ -192,3 +192,28 @@ Not yet checked live in a browser (this was implemented alongside the
 multi-step backend work in the same sandbox session, and the frontend
 verification loop that caught the two bugs above hasn't been re-run against
 this specific change) -- do that before considering this done.
+
+## Startup latency + uint8 stores (promoted 2026-11-16)
+
+`index.html` carries the startup-latency work: pinned `maplibre-gl`/`zarr-layer`
+versions with a flat `modulepreload` list (incl. the zstd decoder, previously
+fetched only after the first chunk), `latest.json` and the first step's
+metadata fetched at HTML-parse time, and data started on `style.load` instead
+of the full map `load` (which waits on ~2 MB of glyphs). First data request
+went from ~3.5 s to ~1.3 s on an unthrottled link.
+
+It also renders uint8-packed probability stores (scale 1/254, 255 = NaN
+sentinel; ~35x smaller) as well as float32 ones, per store, so a cycle that
+mixes both is fine. Two things make that work and must stay: the layer is built
+with `fillValue: 255` (zarr-layer ignores the `_FillValue` attribute for
+integer dtypes and would otherwise treat the array's own fill_value 0 as
+missing), and the click tooltip keeps decoded zeros (`value >= 0`).
+
+The preload URLs pin the `esm.sh` resolution of the current dependency graph;
+if `esm.sh` re-resolves a dependency, some preloads are wasted until the list
+is refreshed.
+
+Writing uint8 is opt-in on the pipeline side: `FRONTFINDER_PACK_UINT8=1` (or
+`write_front_pyramid(..., pack_uint8=True)`). Note `postprocess/front_lines.py`
+reads each published store back, so packing also changes the inputs to the
+spline extraction (see the PR that enabled it).

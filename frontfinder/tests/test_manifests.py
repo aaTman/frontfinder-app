@@ -215,4 +215,4 @@ def test_nbs_trof_tt_no_dewpoint_is_flat_27_channels_without_dewpoint():
     assert names[:-3] == NBS_SQUARE_DILATION_TROF_TT_MANIFEST.channel_names()[:-4]
     assert m.all_classes == NBS_SQUARE_DILATION_TROF_TT_MANIFEST.all_classes
     assert m.served_classes == NBS_SQUARE_DILATION_TROF_TT_MANIFEST.served_classes
-    assert get_manifest("nbs_square_dilation_trof_tt_no_inst_no_dewpoint") is m
+    assert get_manifest("v2.0.1") is m

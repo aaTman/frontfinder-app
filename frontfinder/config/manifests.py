@@ -285,8 +285,14 @@ NBS_SQUARE_DILATION_TROF_TT_MANIFEST = ModelManifest(
 # matching 10m u (~-37..36), 10m v (~-35..36) and surface geopotential
 # (~-905..34175 m2/s2), and the 2 m dewpoint column (~206-304 K) that the
 # previous model had is gone.
+# Served name == the release tag of this model's commit on ai2es/master. It is
+# also the output directory name and the key the webapp fetches
+# (`/data/<name>/latest.json`), so bump it with a new model, not the weights
+# filename.
+MODEL_VERSION_NO_DEWPOINT = "v2.0.1"
+
 NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST = ModelManifest(
-    name="nbs_square_dilation_trof_tt_no_inst_no_dewpoint",
+    name=MODEL_VERSION_NO_DEWPOINT,
     weights_filename="nbs_square_dilation_trof_tt_no_inst_no_dewpoint.keras",
     variables=tuple(
         v for v in SPIX_WCE_DILATION_MANIFEST.variables if v.name != "2m_dewpoint_temperature"

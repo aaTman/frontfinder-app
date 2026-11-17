@@ -97,7 +97,7 @@
     // Keep these two literals in sync with MODELS.latestPointer below --
     // they can't be derived from it because this script runs before the
     // module graph is loaded.
-    const LATEST_MODEL = "nbs_square_dilation_trof_tt_no_inst";
+    const LATEST_MODEL = "v2.0.1";
     const LATEST_POINTER = `/data/${LATEST_MODEL}/latest.json`;
     const warm = fetch(LATEST_POINTER, { cache: "no-store" }).then((res) => {
       if (!res.ok) throw new Error(`no published run for ${LATEST_MODEL} (HTTP ${res.status})`);
@@ -585,14 +585,15 @@
         than the ones described there. It was trained on data through 2024.
       </p>
 
-      <h3>nbs_square_dilation_trof_tt_no_inst</h3>
+      <h3>v2.0.1</h3>
       <p>
         Inputs: equivalent potential temperature (&theta;<sub>e</sub>),
         u-wind, v-wind, and specific humidity, each on six pressure levels
         (1000, 925, 850, 700, 500, and 300&nbsp;hPa), plus 10&nbsp;m u-wind,
-        10&nbsp;m v-wind, 2&nbsp;m dewpoint, and surface geopotential
-        (terrain height), for 28 input channels total, flattened into one
-        channel dimension (a 2D convolutional network). Surface geopotential
+        10&nbsp;m v-wind, and surface geopotential (terrain height), for
+        27 input channels total. 2&nbsp;m dewpoint, used by earlier versions
+        of this model, is no longer an input. The channels are
+        flattened into one channel dimension (a 2D convolutional network). Surface geopotential
         is not part of the real-time IFS feed, so it is taken once from
         ERA5 and reused for every forecast.
       </p>
@@ -604,6 +605,43 @@
         Trained with a neighborhood Brier loss over a square neighborhood,
         against dilated (widened) front and trough labels (see "Loss
         function" below).
+      </p>
+
+      <h3>Changelog</h3>
+      <p>
+        <strong>v2.0.1</strong> (2026-11-17) &mdash; replaces
+        <code>nbs_square_dilation_trof_tt_no_inst</code>, the previously
+        served model.
+      </p>
+      <ul>
+        <li>
+          <strong>Inputs:</strong> 2&nbsp;m dewpoint removed, 28 to 27 input
+          channels. The remaining inputs (&theta;<sub>e</sub>, u, v, and
+          specific humidity on 1000&ndash;300&nbsp;hPa; 10&nbsp;m u and v;
+          surface geopotential) and their order are unchanged.
+        </li>
+        <li>
+          <strong>Unchanged:</strong> the UNet 3+ architecture, the loss
+          (neighborhood Brier over a square neighborhood, dilated labels),
+          and the output classes (cold, warm, stationary, occluded,
+          dryline, trough, tropical trough; instability lines still not
+          shown).
+        </li>
+        <li>
+          <strong>Retrained:</strong> the weights are new, so individual
+          front and trough placements can differ from the previous model
+          even where the inputs match.
+        </li>
+        <li>
+          <strong>Pipeline:</strong> 2&nbsp;m dewpoint is no longer
+          downloaded from IFS.
+        </li>
+      </ul>
+      <p>
+        <strong>nbs_square_dilation_trof_tt_no_inst</strong>
+        (2026-10-08 to 2026-11-17) &mdash; 28 inputs including 2&nbsp;m
+        dewpoint; introduced the trough and tropical trough
+        classes.
       </p>
 
       <h3>Southern hemisphere</h3>
@@ -793,10 +831,12 @@
     const GRID_LAT_ASCENDING = false;
 
     const MODELS = {
-      // 2026-10-08: replaced theta-e_uv_q as the served model.
-      nbs_square_dilation_trof_tt_no_inst: {
-        label: "nbs_square_dilation_trof_tt_no_inst",
-        latestPointer: `${ZARR_ROOT}/nbs_square_dilation_trof_tt_no_inst/latest.json`,
+      // 2026-10-08: nbs_square_dilation_trof_tt_no_inst replaced theta-e_uv_q.
+      // 2026-11-17: replaced by the same network retrained without 2 m
+      // dewpoint (27 inputs instead of 28).
+      "v2.0.1": {
+        label: "v2.0.1",
+        latestPointer: `${ZARR_ROOT}/v2.0.1/latest.json`,
       },
       // model_1702 disabled -- see the HTML comment above and
       // frontfinder/scheduler/cli.py. Re-add once the pipeline is producing
@@ -807,7 +847,7 @@
     // removed 2026-10-01 (no GPU use); with one model left the model-toggles
     // panel is hidden in the HTML, but the multi-model machinery is intact.
     const OPTIONAL_CLASSES = new Set(["dryline"]);
-    const DEFAULT_SELECTED_MODELS = ["nbs_square_dilation_trof_tt_no_inst"];
+    const DEFAULT_SELECTED_MODELS = ["v2.0.1"];
     // CLASS_STYLE and the FRONT_* bin constants now live in ./lib.js (also
     // imported by lib.test.js) so the color palette and bin math can be
     // unit-tested without a browser. See lib.js for the palette's
