@@ -24,7 +24,92 @@
        dist/maplibre-gl.d.ts (no `setProjection`/`ProjectionSpecification`)
        vs v5.24.0's, which has both. Bumped 2026-08-21 alongside adding the
        globe view. -->
-  <link href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet" />
+  <!-- 2026-11-16 (startup-latency pass): open the connections this page's
+       resources need before any script runs. crossorigin: every one of these
+       origins is fetched in CORS mode (esm.sh/unpkg modules, maplibre's
+       fetch()-based style/tile/glyph requests), and a plain preconnect would
+       warm the wrong (non-CORS) connection pool. -->
+  <link rel="preconnect" href="https://esm.sh" crossorigin />
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
+  <!-- Same pass: modulepreload the ENTIRE esm.sh import graph up front. The
+       importmap only pins the two top-level entries; esm.sh serves those as
+       one-line shims that re-export deeper paths, so the real graph is a
+       3-level waterfall -- entry shim -> zarr-layer.mjs / maplibre-gl.mjs ->
+       zarrita/proj4/delaunator/raster-reproject shims -> their leaf .mjs
+       files -- where each level only starts downloading once the previous
+       one has. The numcodecs zstd decoder (its 302 KB zstd.mjs) used to sit
+       even further down: it was only fetched AFTER the first chunk response
+       arrived, serially blocking first paint of the data. Every URL below is
+       copied from the module sources esm.sh actually serves (fetched and
+       checked 2026-11-16) -- note the literal ^ in the ^-range shims and the
+       ?target=es2022 query esm.sh appends for this browser, both of which
+       must match the later import exactly or the preload is wasted. Resolved
+       ranges means an esm.sh re-resolution (e.g. zarrita 0.7.7) would strand
+       stale preloads as unused small fetches until this list is refreshed;
+       the pinned importmap entries below stay authoritative. -->
+  <link rel="modulepreload" href="https://esm.sh/maplibre-gl@5.24.1" />
+  <link rel="modulepreload" href="https://esm.sh/maplibre-gl@5.24.1/es2022/maplibre-gl.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@carbonplan/zarr-layer@0.12.1" />
+  <link rel="modulepreload" href="https://esm.sh/@carbonplan/zarr-layer@0.12.1/es2022/zarr-layer.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@developmentseed/raster-reproject@^0.8.1?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/@developmentseed/raster-reproject@0.8.1/es2022/raster-reproject.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/delaunator@^5.1.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/delaunator@5.1.0/es2022/delaunator.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/robust-predicates@^3.0.2?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/robust-predicates@3.0.3/es2022/robust-predicates.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/proj4@^2.22.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/proj4@2.23.0/es2022/proj4.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/mgrs@1.0.0/es2022/mgrs.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/wkt-parser@^1.9.0?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/wkt-parser@1.9.0/es2022/wkt-parser.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/zarrita@^0.7.5?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/zarrita@0.7.6/es2022/zarrita.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@^0.2.1/fetch?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@0.2.1/es2022/dist/src/util.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/@zarrita/storage@0.2.1/es2022/fetch.mjs" />
+  <!-- The zstd codec numcodecs dynamically imports once the first chunk
+       arrives -- preloading it here takes it off that serial path. -->
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@^0.3.2/zstd?target=es2022" />
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@0.3.2/es2022/dist/chunk-INHXZS53.mjs" />
+  <link rel="modulepreload" href="https://esm.sh/numcodecs@0.3.2/es2022/zstd.mjs" />
+  <!-- Pinned to the exact version esm.sh's @5 range resolves to anyway
+       (5.24.1, confirmed 2026-11-16): unpkg's @5 alias 302-redirects per
+       request, costing a round trip at the front of the waterfall. Keep in
+       sync with the importmap below. -->
+  <link href="https://unpkg.com/maplibre-gl@5.24.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script>
+    // 2026-11-16 (startup-latency pass): this classic inline script runs at
+    // HTML-parse time, while the esm.sh module graph (script type="module",
+    // below) is still downloading and the basemap style hasn't even been
+    // requested. Kicking latest.json off here -- and the first step's root
+    // zarr.json as soon as it parses -- moves the whole data pipeline's
+    // network leg ahead of the map instead of behind it (it used to start
+    // only on the map's "load" event, i.e. after ~2 MB of glyphs/tiles).
+    // Nothing is parsed here; the module's resolveLatestRun() consumes the
+    // stored promise. latest.json itself is deliberately no-store (it's a
+    // moving pointer, see resolveLatestRun); the step's zarr.json is safe to
+    // warm because every zarr store path is served immutable (Caddy
+    // Cache-Control, see the clearAllCachedLayers comment) -- the zarr-layer
+    // metadata fetch later hits the browser HTTP cache with no extra
+    // network request.
+    //
+    // Keep these two literals in sync with MODELS.latestPointer below --
+    // they can't be derived from it because this script runs before the
+    // module graph is loaded.
+    const LATEST_MODEL = "nbs_square_dilation_trof_tt_no_inst";
+    const LATEST_POINTER = `/data/${LATEST_MODEL}/latest.json`;
+    const warm = fetch(LATEST_POINTER, { cache: "no-store" }).then((res) => {
+      if (!res.ok) throw new Error(`no published run for ${LATEST_MODEL} (HTTP ${res.status})`);
+      return res.json();
+    });
+    window.__latestRunPromise = { model: LATEST_MODEL, promise: warm };
+    warm.catch(() => {}); // no unhandled-rejection noise if resolveLatestRun never consumes it
+    warm.then((latest) => {
+      const step = latest?.steps?.[0];
+      if (step?.store) fetch(`/data/${LATEST_MODEL}/${step.store}/zarr.json`, { priority: "high" }).catch(() => {});
+    });
+  </script>
   <style>
     /* 2026-08-24: top nav bar mimicking espr.ai's own site-nav, added per
        Taylor's request. Colors/fonts/breakpoint pulled directly from
@@ -593,11 +678,17 @@
     </div>
   </div>
 
+  <!-- 2026-11-16 (startup-latency pass): pinned to the exact versions the
+       bare @5 ranges were resolving to anyway (confirmed 2026-11-16), so an
+       upstream release can never silently change what this page loads or
+       invalidate the head's modulepreload list. Keep in sync with the unpkg
+       CSS link and the modulepreload URLs above. (No HTML comments INSIDE
+       the script tag below -- importmap contents must be bare JSON.) -->
   <script type="importmap">
     {
       "imports": {
-        "maplibre-gl": "https://esm.sh/maplibre-gl@5",
-        "@carbonplan/zarr-layer": "https://esm.sh/@carbonplan/zarr-layer"
+        "maplibre-gl": "https://esm.sh/maplibre-gl@5.24.1",
+        "@carbonplan/zarr-layer": "https://esm.sh/@carbonplan/zarr-layer@0.12.1"
       }
     }
   </script>
@@ -1403,7 +1494,17 @@
               }
             })
           );
-          return { key, classResults: classResults.filter((r) => r && r.value > 0) };
+          // Finite zero is a real reading, not missing: uint8 stores
+          // quantize all sub-quantum probabilities (< 1/254 ~ 0.004) to an
+          // exact 0 code where a float32 store carries tiny nonzero dust,
+          // so the `value > 0` this filter used to test dropped every
+          // quantized-to-zero class row -- and the entire tooltip at an
+          // all-background point -- from the uint8 pages while the float32
+          // pages kept showing their "0%" rows for the same points. NaN
+          // rows (real float NaNs and the uint8 _FillValue sentinel, now
+          // declared to the layer via fillValue above) are still excluded
+          // by the Number.isFinite check above.
+          return { key, classResults: classResults.filter((r) => r && r.value >= 0) };
         })
       );
       if (requestId !== clickRequestId) return; // superseded by a newer click
@@ -1721,9 +1822,23 @@
       // 6h out to 240h -- 90h for 06Z/18Z cycles, see
       // ecmwf_ifs.target_steps_for_cycle):
       //   {"cycle_time": "...", "steps": [{"step_hours", "valid_time", "store"}, ...]}
-      const res = await fetch(MODELS[model].latestPointer, { cache: "no-store" });
-      if (!res.ok) throw new Error(`no published run for ${model} (HTTP ${res.status})`);
-      const { cycle_time, steps, expected_steps } = await res.json();
+      // 2026-11-16 (startup-latency pass): the head's inline script already
+      // started this exact request at HTML-parse time (see
+      // window.__latestRunPromise) -- consume that response on the first
+      // call instead of re-fetching, then drop it so the later poll
+      // (startPollingForNewSteps) and any model re-load always do a fresh
+      // no-store fetch of the moving pointer.
+      let payload;
+      const early = window.__latestRunPromise;
+      if (early && early.model === model) {
+        delete window.__latestRunPromise;
+        payload = await early.promise;
+      } else {
+        const res = await fetch(MODELS[model].latestPointer, { cache: "no-store" });
+        if (!res.ok) throw new Error(`no published run for ${model} (HTTP ${res.status})`);
+        payload = await res.json();
+      }
+      const { cycle_time, steps, expected_steps } = payload;
       if (!Array.isArray(steps) || steps.length === 0) {
         throw new Error(`latest.json for ${model} has no published steps`);
       }
@@ -1881,6 +1996,20 @@
           zarrVersion: ZARR_VERSION,
           bounds: GRID_BOUNDS,
           latIsAscending: GRID_LAT_ASCENDING,
+          // 2026-11-16 (uint8 stores): the quantized stores carry missing
+          // data as CF _FillValue 255 (NaN sentinel), but the zarr array's
+          // own fill_value is 0, and for non-float dtypes @carbonplan/
+          // zarr-layer falls back to that array fill_value as its "missing"
+          // marker -- it never reads the _FillValue attribute (confirmed
+          // against the esm.sh 0.12.1 source's fill/transform plumbing).
+          // Without pinning it here, every quantized-zero background cell
+          // decoded as missing (tooltip rows vanished vs the float32
+          // stores), and a 255 sentinel decoded as 255/254 ~= 1.004,
+          // rendering as a saturated full-opacity blob and querying as
+          // "100%". 255 can never equal a real float32 probability in
+          // [0,1], so this is inert on the float32 stores production still
+          // serves while the pipeline rolls over.
+          fillValue: 255,
           clim: [0, 1],
           // Two identical stops: customFrag (below) is what actually
           // varies alpha by probability, so the colormap texture itself
@@ -2633,6 +2762,23 @@
       e.target.textContent = hidden ? "Hide" : "Show";
     });
     map.on("click", updateClickTooltip);
+    // 2026-11-16 (startup-latency pass): data used to start inside the
+    // "load" handler below, which MapLibre only fires once the style's ~40
+    // glyph PBFs and first basemap tiles have finished (~2 MB the zarr
+    // layers never touch). "style.load" is the earliest event that makes
+    // map.addLayer() legal, so the whole loadModelData pipeline (latest.json
+    // already warm from the head script, zarr.json warmed too) runs as soon
+    // as the style JSON is parsed. Layer order is unchanged -- these layers
+    // are still appended without a beforeId, on top of the basemap.
+    // isStyleLoaded() covers the (theoretical -- this module runs to
+    // completion synchronously after the map is constructed) race where the
+    // style finished before this line registered the listener.
+    function startDataLayers() {
+      primaryModel = pickPrimaryModel();
+      loadModelData(primaryModel);
+    }
+    if (map.isStyleLoaded()) startDataLayers();
+    else map.once("style.load", startDataLayers);
     map.on("load", () => {
       // 2026-08-21: globe view (per Taylor -- see
       // https://hazard.degreeday.org/?layer=wildfire for the reference
@@ -2644,10 +2790,10 @@
       // fine since it's before this line, but map.on("load", ...) itself
       // never even got registered) -- so the page silently never loaded
       // any data at all, not just "no globe". Calling it inside the
-      // "load" event handler is the fix.
+      // "load" event handler is the fix. (The data start moved to
+      // "style.load" above -- 2026-11-16 -- but setProjection deliberately
+      // stays here on the later, fully-loaded event.)
       map.setProjection({ type: "globe" });
-      primaryModel = pickPrimaryModel();
-      loadModelData(primaryModel);
     });
   </script>
 </body>
