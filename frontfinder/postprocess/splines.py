@@ -9,18 +9,23 @@ sampling follows Niebler et al. (2022, https://doi.org/10.5194/wcd-3-113-2022):
    form one group, so a boundary that changes type along its length stays one line.
 2. Threshold the summed probability and thin each band to a one-pixel crest with ``skeletonize``.
 3. Order each crest's pixels into paths: the longest path first, then any long branches.
-4. Fit a smoothing spline through each path and resample it at an even spacing.
+4. Cut each path into arms where its branches leave it, so a junction where three fronts meet keeps its
+   sharp corner, fit a smoothing spline through each arm and resample it at an even spacing, and pin the
+   arms that meet at a junction to one shared vertex, so they have no gap between them.
 5. Label each point with its most likely front type and cut the line into typed sections.
 6. Pick the side each section's symbols go on, from the temperature contrast across the line, the wind
-   across it, and how far it moved since the previous time.
+   across it, and how far it moved since the previous time. Near a junction the samples that fall across
+   another arm of the same front are ignored.
 7. Track fronts from one time to the next with MODE-style matching (distance, length and type), so a
    front keeps one event ID, and record splits and merges as lineage.
 
 On a global grid the longitudes wrap, so a front that crosses the grid's edge stays one front.
 
 Vendored from ai2es/fronts (branch feature/front-splines, src/fronts/splines.py) without its command-line
-entry point, so the serving pipeline does not depend on the training stack (TensorFlow, W&B, ...). Keep the
-body in sync with upstream; call ``extract_fronts_over_time`` and ``to_geojson`` from ``front_lines.py``.
+entry point, so the serving pipeline does not depend on the training stack (TensorFlow, W&B, ...). The body
+is no longer byte-identical to upstream: it carries local junction handling (see ``find_junctions``,
+``split_at_corners``, ``pin_end``). Keep the rest in sync with upstream; call ``extract_fronts_over_time``
+and ``to_geojson`` from ``front_lines.py``.
 """
 
 import dataclasses
@@ -38,6 +43,8 @@ import xarray as xr
 from skimage.morphology import skeletonize
 
 EARTH_RADIUS_KM = 6371.0
+# Kilometres per degree of latitude (111.19 km), used to read short stretches as flat distances.
+KM_PER_DEG = float(np.radians(EARTH_RADIUS_KM))
 
 # GeoJSON names, in the order section features are written (WindBorne's order for the four fronts).
 CLASSIFICATIONS: dict[str, str] = {
@@ -81,7 +88,8 @@ class SplineConfig:
             into sections by its most likely type.
         threshold: Summed probability a grid point needs to be part of a front band. The probabilities
             are uncalibrated, so tune this against the max-CSI thresholds from ``fronts.evaluate``.
-        min_length_km: Paths shorter than this are dropped. Applies to branches too.
+        min_length_km: Free-standing crests shorter than this are dropped, which removes the short spurs
+            thinning leaves. Branches use ``min_branch_km`` instead when it is set.
         smoothing_deg: About how far (degrees) the spline may stray from the crest pixels.
         spacing_km: Distance between points on the output lines.
         min_section_km: Type changes shorter than this are folded into the neighbouring section.
@@ -96,6 +104,15 @@ class SplineConfig:
         distance_weight: Weight of the distance clue in the total interest.
         length_weight: Weight of the length-ratio clue in the total interest.
         type_weight: Weight of the shared-front-type clue in the total interest.
+        min_branch_km: Shortest branch to keep when it joins another path of the same crest. Arms that end
+            at a junction are worth keeping even when they are too short to stand on their own, because a
+            short third arm is what makes a triple point.
+        corner_deg: A path is cut at a junction where its direction turns by at least this many degrees,
+            so the corner between the two arms is not smoothed away.
+        corner_window_km: How far before and after a junction the turn is measured over.
+        pin_taper_km: Distance over which a pinned end blends back into where the spline put it.
+        clearance_km: Symbol sampling points closer than this to another arm of the same crest are ignored,
+            so a junction does not read the air across its neighbouring arms.
     """
 
     groups: list[list[str]] = dataclasses.field(
@@ -116,6 +133,11 @@ class SplineConfig:
     distance_weight: float = 4.0
     length_weight: float = 1.0
     type_weight: float = 1.0
+    min_branch_km: float = 150.0
+    corner_deg: float = 40.0
+    corner_window_km: float = 100.0
+    pin_taper_km: float = 75.0
+    clearance_km: float = 100.0
 
 
 @dataclasses.dataclass
@@ -144,8 +166,9 @@ class FrontBoundary:
     """A continuous boundary: one crest, as one or more lines of typed sections.
 
     Attributes:
-        lines: Each line is a list of sections in order; each section starts where the last one ends.
-            The first line is the crest's longest path and the rest are branches off it.
+        lines: Each line is a list of sections in order; each section starts where the last one ends. The
+            first line is the first arm of the crest's longest path, then its other arms, then the arms of
+            each branch off it. Lines that meet at a junction share one endpoint.
         event_id: Tracking ID, the same for the same front at every time. Set by ``track_fronts``.
         parents: IDs of other fronts at the previous time that this one split off from or merged with.
     """
@@ -248,7 +271,13 @@ def farthest_path(tree: scipy.sparse.csr_array, nodes: np.ndarray, start: int) -
     return nodes[path[::-1]], float(dist[end])
 
 
-def trace_paths(mask: np.ndarray, lat: np.ndarray, lon: np.ndarray, min_length_km: float) -> list[list[np.ndarray]]:
+def trace_paths(
+    mask: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    min_length_km: float,
+    min_branch_km: float | None = None,
+) -> list[list[np.ndarray]]:
     """Order the pixels of each crest into paths.
 
     Each crest becomes a tree: the minimum spanning tree of its 8-connected pixels, which opens loops and
@@ -260,7 +289,9 @@ def trace_paths(mask: np.ndarray, lat: np.ndarray, lon: np.ndarray, min_length_k
         mask: Boolean crest grid, dims (latitude, longitude).
         lat: Latitude of each row.
         lon: Longitude of each column.
-        min_length_km: Shortest path to keep.
+        min_length_km: Shortest crest to keep.
+        min_branch_km: Shortest branch to keep, when branches should be held to a different length than
+            whole crests. Defaults to ``min_length_km``.
 
     Returns:
         One list per kept crest, holding (n, 2) arrays of (row, col) indices in path order. Branches start
@@ -277,6 +308,7 @@ def trace_paths(mask: np.ndarray, lat: np.ndarray, lon: np.ndarray, min_length_k
         main, length = farthest_path(tree, nodes, far_end)
         if length < min_length_km:
             continue
+        shortest_branch = min_length_km if min_branch_km is None else min_branch_km
         paths = [main]
         used = np.zeros(len(pixels), dtype=bool)
         used[main] = True
@@ -294,7 +326,7 @@ def trace_paths(mask: np.ndarray, lat: np.ndarray, lon: np.ndarray, min_length_k
                 links = scipy.sparse.coo_array(tree[branch_nodes])
                 k = int(np.flatnonzero(used[links.col])[0])
                 branch, length = farthest_path(tree, branch_nodes, int(branch_nodes[links.row[k]]))
-                if length + links.data[k] < min_length_km:
+                if length + links.data[k] < shortest_branch:
                     continue
                 branch = np.concatenate([[links.col[k]], branch])
                 paths.append(branch)
@@ -302,6 +334,253 @@ def trace_paths(mask: np.ndarray, lat: np.ndarray, lon: np.ndarray, min_length_k
                 pending.append(branch_nodes[~used[branch_nodes]])
         crests.append([pixels[path] for path in paths])
     return crests
+
+
+def path_points(path: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the longitudes and latitudes of a crest path's pixels, with longitudes unwrapped.
+
+    Unwrapping keeps a path that crosses a global grid's edge continuous, so distances and angles read
+    along the path instead of jumping 360 degrees.
+    """
+    return np.unwrap(lon[path[:, 1]], period=360.0), lat[path[:, 0]]
+
+
+def find_junctions(crest: list[np.ndarray]) -> list[tuple[int, int, int]]:
+    """Find where each branch of a crest meets a path found before it.
+
+    A wave cyclone's cold, warm and occluded arms thin to one crest with three paths leaving one pixel, and
+    any front that forks does the same, so junctions are found from the topology alone, not from the front
+    types.
+
+    Args:
+        crest: The paths of one crest, as ``trace_paths`` returns them. Each branch starts at the pixel it
+            leaves from, which lies on a path before it.
+
+    Returns:
+        (path index, position in that path, branch index) for each branch, in ``trace_paths``' order.
+        Branches that start off every earlier path (which ``trace_paths`` does not produce) are skipped.
+    """
+    seen: dict[tuple[int, int], tuple[int, int]] = {}
+    for index, path in enumerate(crest):
+        for position, (row, col) in enumerate(path):
+            seen.setdefault((int(row), int(col)), (index, position))
+    junctions = []
+    for branch, path in enumerate(crest[1:], start=1):
+        row, col = path[0]
+        parent = seen.get((int(row), int(col)))
+        if parent is not None and parent[0] != branch:
+            junctions.append((parent[0], parent[1], branch))
+    return junctions
+
+
+@dataclasses.dataclass
+class Junction:
+    """One pixel where arms of a crest meet.
+
+    Attributes:
+        pixel: (row, col) index of the crest pixel the arms meet at.
+        arms: (arm index, end) for every arm that ends here, with end 0 for the arm's first point and -1
+            for its last.
+        corner: Whether the path that met here was cut, so the arms that end here form a corner.
+        through: Index of the arm that carries on through here, or None when a corner was cut.
+    """
+
+    pixel: tuple[int, int]
+    arms: list[tuple[int, int]] = dataclasses.field(default_factory=list)
+    corner: bool = False
+    through: int | None = None
+
+
+def turn_angle_deg(lon: np.ndarray, lat: np.ndarray, k: int, window_km: float) -> float:
+    """Return how far (degrees) the path through ordered points turns at point ``k``.
+
+    Each leg is read from ``k`` out to the nearest point at least ``window_km`` away, clipped to the path's
+    ends, and the two legs are compared as flat distances in the local east/north frame.
+    """
+    dist = np.concatenate([[0.0], np.cumsum(haversine_km(lon[:-1], lat[:-1], lon[1:], lat[1:]))])
+    back = np.flatnonzero(dist[k] - dist[: k + 1] >= window_km)
+    ahead = np.flatnonzero(dist[k:] - dist[k] >= window_km)
+    before = int(back[-1]) if back.size else 0
+    after = k + int(ahead[0]) if ahead.size else len(lon) - 1
+    dlon = (np.diff(lon) + 180.0) % 360.0 - 180.0
+    east = np.concatenate([[0.0], np.cumsum(dlon * np.cos(np.radians(lat[:-1] + lat[1:]) / 2) * KM_PER_DEG)])
+    north = np.concatenate([[0.0], np.cumsum(np.diff(lat) * KM_PER_DEG)])
+    coming = (east[k] - east[before], north[k] - north[before])
+    going = (east[after] - east[k], north[after] - north[k])
+    scale = float(np.hypot(*coming) * np.hypot(*going))
+    if scale == 0.0:
+        return 0.0
+    cos = (coming[0] * going[0] + coming[1] * going[1]) / scale
+    return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+
+
+def split_at_corners(
+    crest: list[np.ndarray],
+    junctions: list[tuple[int, int, int]],
+    lat: np.ndarray,
+    lon: np.ndarray,
+    config: SplineConfig,
+) -> tuple[list[np.ndarray], list[Junction]]:
+    """Cut each path of a crest into arms where it turns sharply at a junction.
+
+    A path is cut at a junction when its direction turns by at least ``config.corner_deg`` there and both
+    sides run at least ``config.min_section_km``, so the corner between the arms survives smoothing. A path
+    that carries on through a junction is left whole and the arm that left it is pinned onto it later (see
+    ``pin_junctions``). A path may be cut at several junctions, and both arms of a cut hold the pixel the
+    cut was made at.
+
+    Args:
+        crest: The paths of one crest, as ``trace_paths`` returns them.
+        junctions: Junctions of those paths, from ``find_junctions``.
+        lat: Latitude of each row.
+        lon: Longitude of each column.
+        config: Spline settings (corner angle and window, shortest section).
+
+    Returns:
+        The arms, as (row, col) arrays in walking order, and one ``Junction`` per place where paths meet.
+    """
+    cuts: dict[int, list[int]] = {}
+    for parent, k, _branch in junctions:
+        path_lon, path_lat = path_points(crest[parent], lat, lon)
+        if k <= 0 or k >= len(path_lon) - 1:
+            continue
+        dist = np.concatenate(
+            [[0.0], np.cumsum(haversine_km(path_lon[:-1], path_lat[:-1], path_lon[1:], path_lat[1:]))]
+        )
+        if dist[k] < config.min_section_km or dist[-1] - dist[k] < config.min_section_km:
+            continue
+        if turn_angle_deg(path_lon, path_lat, k, config.corner_window_km) >= config.corner_deg:
+            # Two branches can leave at the same pixel, which is one corner, not two cuts.
+            cuts.setdefault(parent, [])
+            if k not in cuts[parent]:
+                cuts[parent].append(k)
+    arms: list[np.ndarray] = []
+    # For each path, the arms cut from it as (arm index, first and last position in the path).
+    spans: list[list[tuple[int, int, int]]] = []
+    for index, path in enumerate(crest):
+        bounds = [0, *sorted(cuts.get(index, [])), len(path) - 1]
+        segments = list(zip(bounds, bounds[1:]))
+        spans.append([(len(arms) + i, start, stop) for i, (start, stop) in enumerate(segments)])
+        arms.extend(path[start : stop + 1] for start, stop in segments)
+    joined: dict[tuple[int, int], Junction] = {}
+    for parent, k, branch in junctions:
+        if (parent, k) not in joined:
+            corner = k in cuts.get(parent, [])
+            ends, through = [], None
+            for arm, start, stop in spans[parent]:
+                if corner and stop == k:
+                    ends.append((arm, -1))
+                elif corner and start == k:
+                    ends.append((arm, 0))
+                elif start <= k <= stop:
+                    through = arm
+            row, col = crest[parent][k]
+            joined[(parent, k)] = Junction(pixel=(int(row), int(col)), arms=ends, corner=corner, through=through)
+        joined[(parent, k)].arms.append((next(arm for arm, start, _ in spans[branch] if start == 0), 0))
+    return arms, list(joined.values())
+
+
+def lon_near(lon: float, reference: float) -> float:
+    """Return ``lon`` moved by whole turns of 360 degrees to the copy nearest ``reference``.
+
+    Lines are unwrapped one at a time, so two ends of a junction can name the same place 360 degrees apart.
+    """
+    return float(lon) + 360.0 * round((float(reference) - float(lon)) / 360.0)
+
+
+def project_to_polyline(lon: np.ndarray, lat: np.ndarray, point_lon: float, point_lat: float) -> tuple[float, float]:
+    """Return the point of the line through (lon, lat) closest to a point, as (longitude, latitude)."""
+    if len(lon) < 2:
+        return float(lon[0]), float(lat[0])
+    frame = lon + 360.0 * np.round((point_lon - lon) / 360.0)  # lon_near, for the whole line at once
+    cos_lat = np.cos(np.radians(point_lat))
+    east = np.radians(frame - point_lon) * EARTH_RADIUS_KM * cos_lat
+    north = np.radians(lat - point_lat) * EARTH_RADIUS_KM
+    de, dn = np.diff(east), np.diff(north)
+    length = np.where(de**2 + dn**2 > 0.0, de**2 + dn**2, 1.0)
+    # The query point is the origin of the frame, so its projection on a segment is the segment's start
+    # plus how far along it the origin falls.
+    step = np.clip(-(east[:-1] * de + north[:-1] * dn) / length, 0.0, 1.0)
+    near = east[:-1] + step * de, north[:-1] + step * dn
+    i = int(np.argmin(near[0] ** 2 + near[1] ** 2))
+    return (
+        point_lon + float(np.degrees(near[0][i] / (EARTH_RADIUS_KM * cos_lat))),
+        point_lat + float(np.degrees(near[1][i] / EARTH_RADIUS_KM)),
+    )
+
+
+def pin_end(
+    lon: np.ndarray, lat: np.ndarray, at_start: bool, target_lon: float, target_lat: float, taper_km: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Move one end of a line onto a point, fading the move out along the line.
+
+    The end point lands exactly on the target, so the lines that meet there share one vertex. Every other
+    point moves by 0.5 * (1 + cos(pi * d / taper)) of the move, where ``d`` is how far it is along the line
+    from that end, so the line eases back to where the spline put it over ``taper_km``, or half its length
+    when it is shorter. Points past the taper are left alone.
+
+    Args:
+        lon: Longitudes of the line's points.
+        lat: Latitudes of the line's points.
+        at_start: Move the first point onto the target, instead of the last one.
+        target_lon: Longitude to move the end onto, in any of the grid's turns.
+        target_lat: Latitude to move the end onto.
+        taper_km: Distance over which the move fades out.
+
+    Returns:
+        Longitudes and latitudes of the moved line, in the line's own longitude frame.
+    """
+    end = 0 if at_start else -1
+    target_lon = lon_near(target_lon, float(lon[end]))
+    dist = np.concatenate([[0.0], np.cumsum(haversine_km(lon[:-1], lat[:-1], lon[1:], lat[1:]))])
+    taper = min(taper_km, dist[-1] / 2)
+    along = dist if at_start else dist[-1] - dist
+    scaled = np.divide(along, taper, out=np.zeros_like(along), where=taper > 0)
+    weight = np.where(along < taper, 0.5 * (1 + np.cos(np.pi * scaled)), 0.0)
+    new_lon = lon + weight * (target_lon - lon[end])
+    new_lat = lat + weight * (target_lat - lat[end])
+    new_lon[end], new_lat[end] = target_lon, target_lat
+    return new_lon, new_lat
+
+
+def pin_junctions(
+    lines: list[tuple[np.ndarray, np.ndarray]], junctions: list[Junction], config: SplineConfig
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Pin the ends of the lines that meet at each junction onto one shared vertex.
+
+    At a corner, every line that ends there moves onto the mean of their end points, which keeps the
+    corner's angle and closes the gap of about a pixel the separate splines leave. Where one line carries
+    on through a junction, it is left where it is and the line that left it ends on the point of it that is
+    closest, so the branch lands on the front it came off.
+
+    Args:
+        lines: Smoothed lines, as (longitude, latitude) pairs.
+        junctions: Junctions of those lines, from ``split_at_corners``.
+        config: Spline settings (pin taper).
+
+    Returns:
+        The lines with their meeting ends pinned, in the same order.
+    """
+    moves: list[tuple[int, bool, float, float]] = []
+    for junction in junctions:
+        ends = [(arm, end, lines[arm][0][end], lines[arm][1][end]) for arm, end in junction.arms]
+        if not ends:
+            continue
+        if junction.corner:
+            reference = float(ends[0][2])
+            target_lon = float(np.mean([lon_near(lon, reference) for _, _, lon, _ in ends]))
+            target_lat = float(np.mean([lat for _, _, _, lat in ends]))
+            moves.extend((arm, end == 0, target_lon, target_lat) for arm, end, _, _ in ends)
+            continue
+        if junction.through is None:
+            continue
+        parent_lon, parent_lat = lines[junction.through]
+        for arm, end, lon, lat in ends:
+            moves.append((arm, end == 0, *project_to_polyline(parent_lon, parent_lat, lon, lat)))
+    pinned = list(lines)
+    for arm, at_start, target_lon, target_lat in moves:
+        pinned[arm] = pin_end(*pinned[arm], at_start, target_lon, target_lat, config.pin_taper_km)
+    return pinned
 
 
 def smooth_line(
@@ -424,6 +703,13 @@ def finite_mean(values: np.ndarray) -> float:
     return float(values.mean()) if values.size else 0.0
 
 
+def masked_mean(values: np.ndarray, masked: np.ndarray) -> float:
+    """Return ``finite_mean`` over the unmasked values, or over all of them when all are masked."""
+    if masked.all():
+        return finite_mean(values)
+    return finite_mean(np.where(masked, np.nan, values))
+
+
 def unit_vectors(lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
     """Return points as 3-D unit vectors, shape (n, 3), so straight-line distance grows with distance on Earth."""
     lon, lat = np.radians(lon), np.radians(lat)
@@ -452,6 +738,24 @@ class PointIndex:
         """Return the indices of indexed points within ``km`` of any query point."""
         hits = self.tree.query_ball_point(unit_vectors(lon, lat), r=2 * np.sin(km / (2 * EARTH_RADIUS_KM)))
         return np.unique(np.fromiter(itertools.chain.from_iterable(hits), dtype=np.int64))
+
+
+def clearance_mask(lon: np.ndarray, lat: np.ndarray, others: PointIndex | None, clearance_km: float) -> np.ndarray:
+    """Return which points come within ``clearance_km`` of ``others``, all False when there are none."""
+    if others is None:
+        return np.zeros(len(lon), dtype=bool)
+    return others.nearest(lon, lat)[0] < clearance_km
+
+
+def other_arm_points(lines: list[tuple[np.ndarray, np.ndarray]], index: int) -> PointIndex | None:
+    """Return the points of every line but ``index``, for keeping an arm's samples off its neighbours."""
+    rest = [line for other, line in enumerate(lines) if other != index]
+    if not rest:
+        return None
+    return PointIndex(
+        np.concatenate([lon for lon, _ in rest]),
+        np.concatenate([lat for _, lat in rest]),
+    )
 
 
 def motion_km(
@@ -487,6 +791,7 @@ def symbol_side(
     u: xr.DataArray | None = None,
     v: xr.DataArray | None = None,
     previous: PointIndex | None = None,
+    others: PointIndex | None = None,
 ) -> str:
     """Pick which side of a section its symbols go on.
 
@@ -507,6 +812,9 @@ def symbol_side(
         u: Eastward wind (m/s), dims (latitude, longitude).
         v: Northward wind (m/s), dims (latitude, longitude).
         previous: The same group's front points at the previous time.
+        others: The other arms of the same crest. Sampling points that fall within ``clearance_km`` of one
+            of them are dropped, since they read the air across a neighbouring arm rather than across this
+            section. A clue whose every sample is dropped falls back to reading them all.
 
     Returns:
         "left" or "right".
@@ -515,13 +823,16 @@ def symbol_side(
     d = config.offset_km
     left = offset_points(section.lon, section.lat, east * d, north * d)
     right = offset_points(section.lon, section.lat, -east * d, -north * d)
+    on = (section.lon, section.lat)
+    near = [clearance_mask(*pts, others, config.clearance_km) for pts in (left, on, right)]
     clues = np.zeros(3)
     if temperature is not None:
-        contrast = finite_mean(sample(temperature, *left) - sample(temperature, *right))
-        clues[0] = np.tanh(contrast / config.temperature_scale_k)
+        contrast = sample(temperature, *left) - sample(temperature, *right)
+        # A pair only says something when the air on both sides of the line belongs to this section.
+        clues[0] = np.tanh(masked_mean(contrast, near[0] | near[2]) / config.temperature_scale_k)
     if u is not None and v is not None:
-        cross = [sample(u, *pts) * east + sample(v, *pts) * north for pts in (left, (section.lon, section.lat), right)]
-        clues[1] = np.tanh(finite_mean(np.concatenate(cross)) / config.wind_scale_ms)
+        cross = np.concatenate([sample(u, *pts) * east + sample(v, *pts) * north for pts in (left, on, right)])
+        clues[1] = np.tanh(masked_mean(cross, np.concatenate(near)) / config.wind_scale_ms)
     if previous is not None:
         moved = motion_km(section.lon, section.lat, east, north, previous, config.max_motion_km)
         clues[2] = np.tanh(moved / config.motion_scale_km)
@@ -572,18 +883,28 @@ def extract_fronts(
             else None
         )
         mask = crest_mask(total, config.threshold, periodic=is_periodic(lon))
-        for crest in trace_paths(mask, lat, lon, config.min_length_km):
+        for traced in trace_paths(mask, lat, lon, config.min_length_km, config.min_branch_km):
+            # A spline needs two distinct pixels, and the arms are cut from the paths, so paths that cannot
+            # be one are dropped before the junctions are read off the path numbering.
+            crest = [path for path in traced if len(np.unique(path, axis=0)) > 1]
+            if not crest:
+                continue
+            arms, junctions = split_at_corners(crest, find_junctions(crest), lat, lon, config)
+            smoothed = [
+                smooth_line(*path_points(arm, lat, lon), config.smoothing_deg, config.spacing_km) for arm in arms
+            ]
+            smoothed = pin_junctions(smoothed, junctions, config)
             lines = []
-            for path in crest:
-                # Unwrapping keeps a path that crosses a global grid's edge continuous.
-                path_lon = np.unwrap(lon[path[:, 1]], period=360.0)
-                line_lon, line_lat = smooth_line(path_lon, lat[path[:, 0]], config.smoothing_deg, config.spacing_km)
+            for arm, (line_lon, line_lat) in enumerate(smoothed):
+                # Near a junction the air either side of one arm lies across the other arms, so each arm is
+                # told where the rest of its crest is and ignores the samples that fall on them.
+                others = other_arm_points(smoothed, arm)
                 probs = np.nan_to_num(np.stack([sample(probabilities[ft], line_lon, line_lat) for ft in types]))
                 sections = []
                 for k, start, stop in split_sections(probs, line_lon, line_lat, config.min_section_km):
                     points = slice(start, stop + 1)
                     section = FrontSection(types[k], line_lon[points], line_lat[points], probs[k, points])
-                    section.symbol_side = symbol_side(section, config, temperature, u, v, previous_points)
+                    section.symbol_side = symbol_side(section, config, temperature, u, v, previous_points, others)
                     sections.append(section)
                 lines.append(sections)
             boundaries.append(FrontBoundary(lines))
