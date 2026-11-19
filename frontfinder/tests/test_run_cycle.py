@@ -1,4 +1,5 @@
 import json
+import os
 
 import numpy as np
 import pytest
@@ -486,3 +487,160 @@ def test_run_cycle_packing_without_front_lines_writes_no_probabilities_sidecar(t
     monkeypatch.setenv("FRONTFINDER_PACK_UINT8", "1")
     run_cycle(_model_1702_config(), tiny_source, "2026-08-19", 12, str(tmp_path), steps=(0,))
     assert not list((tmp_path / "model_1702").glob("*.probs.npz"))
+
+
+class PressureSource:
+    """Wraps the fake source and serves the two single-level variables the
+    pressure layer fetches: a smooth synthetic MSLP field with one low (like
+    IFS `msl`, but deterministic and offline) and whatever the fake source
+    gives for `surface_pressure` (a plausible flat-ish sp field)."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @property
+    def lat(self):
+        return self._inner.lat
+
+    @property
+    def lon(self):
+        return self._inner.lon
+
+    def fetch_pressure_level(self, variable, level_hpa, cycle):
+        return self._inner.fetch_pressure_level(variable, level_hpa, cycle)
+
+    def fetch_single_level(self, variable, cycle):
+        if variable == "mean_sea_level_pressure":
+            lat, lon = np.meshgrid(self._inner.lat, self._inner.lon, indexing="ij")
+            low_pa = 1500.0 * np.exp(-(((lat - 40.0) / 6.0) ** 2 + ((lon - 265.0) / 8.0) ** 2))
+            return 101325.0 - low_pa  # a ~15 hPa low near (40N, 265E)
+        return self._inner.fetch_single_level(variable, cycle)
+
+
+class RaisingSource:
+    """Wraps a source and raises for whichever single-level variables are
+    named in `raise_for` -- the failure mode _write_pressure_layer must
+    survive (a feed that doesn't carry the variable, a bad GRIB, etc)."""
+
+    def __init__(self, inner, raise_for=()):
+        self._inner = inner
+        self._raise_for = set(raise_for)
+
+    @property
+    def lat(self):
+        return self._inner.lat
+
+    @property
+    def lon(self):
+        return self._inner.lon
+
+    def fetch_pressure_level(self, variable, level_hpa, cycle):
+        return self._inner.fetch_pressure_level(variable, level_hpa, cycle)
+
+    def fetch_single_level(self, variable, cycle):
+        if variable in self._raise_for:
+            raise RuntimeError(f"simulated missing variable: {variable}")
+        return self._inner.fetch_single_level(variable, cycle)
+
+
+def _model_1702_run_config():
+    return ModelRunConfig(
+        manifest=MODEL_1702_MANIFEST, predictor=FakePredictor(), patch_size=64, overlap=16, n_pyramid_levels=2
+    )
+
+
+def test_run_one_model_with_save_pressure_writes_a_pressure_geojson_next_to_the_store(tiny_source, tmp_path):
+    cycle = IFSCycle(date="2026-08-19", run_hour=0)
+    store_path = run_one_model(_model_1702_run_config(), PressureSource(tiny_source), cycle, str(tmp_path), save_pressure=True)
+
+    path = tmp_path / "model_1702" / "2026-08-19T00Z_f000.pressure.geojson"
+    assert os.path.dirname(store_path) == str(tmp_path / "model_1702")
+    collection = json.loads(path.read_text())
+    assert collection["type"] == "FeatureCollection"
+    assert collection["valid_time"] == "2026-08-19T00:00:00"
+    assert len(collection["features"]) >= 1
+    assert any(f["properties"]["kind"] == "isobar" for f in collection["features"])
+
+
+def test_run_one_model_without_save_pressure_writes_no_pressure_file(tiny_source, tmp_path):
+    cycle = IFSCycle(date="2026-08-19", run_hour=0)
+    run_one_model(_model_1702_run_config(), PressureSource(tiny_source), cycle, str(tmp_path), save_pressure=False)
+    assert not list((tmp_path / "model_1702").glob("*.pressure.geojson"))
+
+
+def test_write_pressure_layer_survives_a_source_that_raises_for_mslp(tiny_source, tmp_path):
+    # The whole point of the helper being best effort: a feed that can't
+    # serve MSLP must leave no file and no exception, not break the step.
+    from frontfinder.scheduler.run_cycle import _write_pressure_layer
+
+    model_dir = tmp_path / "model_1702"
+    model_dir.mkdir()
+    source = RaisingSource(PressureSource(tiny_source), raise_for={"mean_sea_level_pressure"})
+    _write_pressure_layer(source, IFSCycle(date="2026-08-19", run_hour=0), str(model_dir / "2026-08-19T00Z_f000.zarr"))
+    assert not list(model_dir.glob("*.pressure.geojson"))
+
+
+def test_write_pressure_layer_still_writes_when_only_surface_pressure_raises(tiny_source, tmp_path):
+    # surface_pressure only refines the H/L placement -- losing it must not
+    # cost us the isobars.
+    from frontfinder.scheduler.run_cycle import _write_pressure_layer
+
+    model_dir = tmp_path / "model_1702"
+    model_dir.mkdir()
+    source = RaisingSource(PressureSource(tiny_source), raise_for={"surface_pressure"})
+    _write_pressure_layer(source, IFSCycle(date="2026-08-19", run_hour=0), str(model_dir / "2026-08-19T00Z_f000.zarr"))
+    collection = json.loads((model_dir / "2026-08-19T00Z_f000.pressure.geojson").read_text())
+    assert collection["features"]
+
+
+def test_write_pressure_layer_does_not_overwrite_an_existing_file(tiny_source, tmp_path):
+    # Resumed cycles call this for steps that already have their layer;
+    # rewriting it would be wasted work at best.
+    from frontfinder.scheduler.run_cycle import _write_pressure_layer
+
+    model_dir = tmp_path / "model_1702"
+    model_dir.mkdir()
+    existing = model_dir / "2026-08-19T00Z_f000.pressure.geojson"
+    existing.write_text("sentinel")
+    source = PressureSource(tiny_source)
+    _write_pressure_layer(source, IFSCycle(date="2026-08-19", run_hour=0), str(model_dir / "2026-08-19T00Z_f000.zarr"))
+    assert existing.read_text() == "sentinel"
+
+
+def test_run_cycle_leaves_pressure_out_unless_asked(tiny_source, tmp_path):
+    run_cycle(_model_1702_config(), PressureSource(tiny_source), "2026-08-19", 12, str(tmp_path), steps=(0, 6))
+    pointer = json.loads((tmp_path / "model_1702" / "latest.json").read_text())
+    assert all("pressure" not in s for s in pointer["steps"])
+    assert not list((tmp_path / "model_1702").glob("*.pressure.geojson"))
+
+
+def test_run_cycle_with_pressure_lists_a_geojson_per_step_in_latest_json(tiny_source, tmp_path):
+    run_cycle(
+        _model_1702_config(), PressureSource(tiny_source), "2026-08-19", 12, str(tmp_path), steps=(0, 6, 12), pressure=True
+    )
+    model_dir = tmp_path / "model_1702"
+    pointer = json.loads((model_dir / "latest.json").read_text())
+    assert [s["pressure"] for s in pointer["steps"]] == [
+        "2026-08-19T12Z_f000.pressure.geojson",
+        "2026-08-19T12Z_f006.pressure.geojson",
+        "2026-08-19T12Z_f012.pressure.geojson",
+    ]
+    collection = json.loads((model_dir / pointer["steps"][1]["pressure"]).read_text())
+    assert collection["type"] == "FeatureCollection"
+    assert collection["valid_time"] == "2026-08-19T18:00:00"
+
+
+def test_run_cycle_resume_adds_pressure_to_steps_it_skips(tiny_source, tmp_path):
+    # cli.py's --poll resume re-runs a cycle with already-written stores;
+    # with pressure on, the skipped steps must still get their layer.
+    configs = _model_1702_config()
+    source = PressureSource(tiny_source)
+    run_cycle(configs, source, "2026-08-19", 12, str(tmp_path), steps=(0, 6))  # no pressure the first time
+    assert not list((tmp_path / "model_1702").glob("*.pressure.geojson"))
+
+    run_cycle(configs, source, "2026-08-19", 12, str(tmp_path), steps=(0, 6), pressure=True)
+    pointer = json.loads((tmp_path / "model_1702" / "latest.json").read_text())
+    assert [s["pressure"] for s in pointer["steps"]] == [
+        "2026-08-19T12Z_f000.pressure.geojson",
+        "2026-08-19T12Z_f006.pressure.geojson",
+    ]

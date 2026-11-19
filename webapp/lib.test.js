@@ -24,6 +24,17 @@ import {
   symbolClassesWithPeriod,
   symbolFilter,
   symbolPeriods,
+  PRESSURE_COLORS,
+  PRESSURE_FONT,
+  PRESSURE_FONT_BOLD,
+  PRESSURE_KINDS,
+  pressureUrl,
+  isobarFilter,
+  centerFilter,
+  isobarLabelFilter,
+  centerColorExpression,
+  withPressureKinds,
+  pressureStatus,
 } from "./lib.js";
 
 test("hexToRgb01 converts pure primaries and grays", () => {
@@ -38,7 +49,8 @@ test("CLASS_STYLE has one distinct color per class, colorblind-safe order", () =
   const classes = Object.keys(CLASS_STYLE);
   assert.deepEqual(classes, ["cold", "warm", "stationary", "occluded", "dryline", "trough", "tropical_trough"]);
   const colors = classes.map((cls) => CLASS_STYLE[cls].color);
-  assert.equal(new Set(colors).size, colors.length, "every class needs a distinct color");
+  // trough and tropical_trough share a color; line style (dashed vs solid) separates them.
+  assert.equal(new Set(colors).size, colors.length - 1, "every class but the trough pair needs a distinct color");
   for (const color of colors) {
     assert.match(color, /^#[0-9a-f]{6}$/, `${color} must be a lowercase 6-digit hex string`);
   }
@@ -46,7 +58,7 @@ test("CLASS_STYLE has one distinct color per class, colorblind-safe order", () =
   // 7, 4 of the dataviz skill's reference categorical order, plus the two
   // CVD-searched trough colors -- see lib.js) so a future edit that silently
   // reverts to a non-validated set fails loudly.
-  assert.deepEqual(colors, ["#3987e5", "#d95926", "#199e70", "#9085e9", "#c98500", "#992288", "#bb1111"]);
+  assert.deepEqual(colors, ["#3987e5", "#d62728", "#199e70", "#9085e9", "#c98500", "#8c8c8c", "#8c8c8c"]);
 });
 
 test("bandOpacityForBin and binForBandOpacity round-trip for every bin", () => {
@@ -217,8 +229,8 @@ test("stationary lines are never green, and oriented ones are drawn by the tile"
 
 test("lineFilter splits solid from dashed classes and honors the class checkboxes", () => {
   const all = Object.keys(CLASS_STYLE);
-  assert.deepEqual(lineFilter(false, all)[2][1], ["cold", "warm", "stationary", "occluded"]);
-  assert.deepEqual(lineFilter(true, all)[2][1], ["dryline", "trough", "tropical_trough"]);
+  assert.deepEqual(lineFilter(false, all)[2][1], ["cold", "warm", "stationary", "occluded", "tropical_trough"]);
+  assert.deepEqual(lineFilter(true, all)[2][1], ["dryline", "trough"]);
   assert.deepEqual(lineFilter(false, ["warm", "trough"])[2][1], ["warm"]);
   assert.deepEqual(lineFilter(true, new Set(["warm", "trough"]))[2][1], ["trough"]);
   assert.deepEqual(lineFilter(false, [])[2][1], []);
@@ -272,4 +284,146 @@ test("symbols are only drawn for oriented lines", () => {
   const filter = symbolFilter(26, ["cold"]);
   assert.equal(filter[0], "all");
   assert.deepEqual(filter[2], ["==", ["get", "oriented"], true]);
+});
+
+// --- pressure overlays (isobars + highs/lows) ---
+
+const samplePressure = {
+  type: "FeatureCollection",
+  valid_time: "2026-11-19T12:00:00",
+  features: [
+    { type: "Feature", geometry: { type: "LineString", coordinates: [[0, 0], [1, 1]] }, properties: { kind: "isobar", hpa: 1008, major: false } },
+    { type: "Feature", geometry: { type: "LineString", coordinates: [[175, 60], [185, 61]] }, properties: { kind: "isobar", hpa: 1020, major: true } },
+    { type: "Feature", geometry: { type: "Point", coordinates: [-100, 45] }, properties: { kind: "L", hpa: 1003 } },
+    { type: "Feature", geometry: { type: "Point", coordinates: [-80, 30] }, properties: { kind: "H", hpa: 1027 } },
+  ],
+};
+
+test("pressureUrl builds a path under the model dir, and is null without a pressure file", () => {
+  assert.equal(pressureUrl("/data", "m", { pressure: "a.pressure.geojson" }), "/data/m/a.pressure.geojson");
+  assert.equal(pressureUrl("/data", "m", { store: "a.zarr", fronts: "a.fronts.geojson" }), null);
+  assert.equal(pressureUrl("/data", "m", { pressure: "" }), null);
+  assert.equal(pressureUrl("/data", "m", { pressure: 7 }), null);
+  assert.equal(pressureUrl("/data", "m", { pressure: ["a.geojson"] }), null);
+  assert.equal(pressureUrl("/data", "m", undefined), null);
+  assert.equal(pressureUrl("/data", "m", null), null);
+});
+
+test("PRESSURE_COLORS are distinct lowercase hex colors, H blue and L red", () => {
+  const colors = Object.values(PRESSURE_COLORS);
+  for (const color of colors) assert.match(color, /^#[0-9a-f]{6}$/, `${color} must be a lowercase 6-digit hex string`);
+  assert.equal(new Set(colors).size, colors.length, "every pressure color must be distinct");
+  // H is the blue end, L the red end -- and neither may collide with the
+  // cold/warm front colors they share the map with.
+  const [hr, hg, hb] = hexToRgb01(PRESSURE_COLORS.high);
+  const [lr, lg, lb] = hexToRgb01(PRESSURE_COLORS.low);
+  assert.ok(hb > hr && hb > hg, `${PRESSURE_COLORS.high} must read as blue`);
+  assert.ok(lr > lg && lr > lb, `${PRESSURE_COLORS.low} must read as red`);
+  assert.notEqual(PRESSURE_COLORS.high, CLASS_STYLE.cold.color);
+  assert.notEqual(PRESSURE_COLORS.low, CLASS_STYLE.warm.color);
+  // The isobar pair is a muted slate: no channel dominates, and the major
+  // stroke is the darker of the two.
+  for (const color of [PRESSURE_COLORS.isobar, PRESSURE_COLORS.isobarMajor]) {
+    const [r, g, b] = hexToRgb01(color);
+    assert.ok(Math.abs(r - b) < 0.25 && Math.abs(r - g) < 0.25, `${color} must read as neutral slate`);
+  }
+  const lum = (color) => hexToRgb01(color).reduce((sum, c) => sum + c, 0);
+  assert.ok(lum(PRESSURE_COLORS.isobarMajor) < lum(PRESSURE_COLORS.isobar));
+});
+
+test("pressure label fonts are stacks the basemap's glyph server serves", () => {
+  // The positron style's own label layers only ever ask for these three
+  // (see lib.js); anything else 404s and no text is drawn at all.
+  const served = ["Noto Sans Regular", "Noto Sans Italic", "Noto Sans Bold"];
+  for (const stack of [PRESSURE_FONT, PRESSURE_FONT_BOLD]) {
+    assert.ok(Array.isArray(stack) && stack.length > 0);
+    for (const name of stack) assert.ok(served.includes(name), `${name} is not served by the basemap's glyph endpoint`);
+  }
+  assert.deepEqual(PRESSURE_FONT, ["Noto Sans Regular"]);
+  assert.deepEqual(PRESSURE_FONT_BOLD, ["Noto Sans Bold"]);
+});
+
+test("the isobar and center filters split the file by kind", () => {
+  assert.deepEqual(isobarFilter(), ["==", ["get", "kind"], "isobar"]);
+  assert.deepEqual(centerFilter(), ["in", ["get", "kind"], ["literal", ["L", "H"]]]);
+  assert.deepEqual(PRESSURE_KINDS, ["isobar", "H", "L"]);
+});
+
+test("isobarLabelFilter keeps only the major lines below the zoom cutoff", () => {
+  const filter = isobarLabelFilter(4);
+  assert.deepEqual(filter[0], "all");
+  assert.deepEqual(filter[1], isobarFilter());
+  assert.deepEqual(filter[2], ["any", ["==", ["get", "major"], true], [">=", ["zoom"], 4]]);
+});
+
+test("centerColorExpression colors H blue and L red with a fallback", () => {
+  const expr = centerColorExpression();
+  assert.deepEqual(expr.slice(0, 2), ["match", ["get", "kind"]]);
+  assert.equal(expr[expr.indexOf("H") + 1], PRESSURE_COLORS.high);
+  assert.equal(expr[expr.indexOf("L") + 1], PRESSURE_COLORS.low);
+  assert.equal(typeof expr.at(-1), "string");
+  assert.equal(expr.length, 2 + 2 * 2 + 1);
+});
+
+test("withPressureKinds keeps the recognizable features and rewrites their properties", () => {
+  const before = JSON.stringify(samplePressure);
+  const out = withPressureKinds(samplePressure);
+  assert.equal(JSON.stringify(samplePressure), before); // input untouched
+  assert.equal(out.type, "FeatureCollection");
+  assert.deepEqual(out.features.map((f) => f.properties), [
+    { kind: "isobar", hpa: 1008, major: false },
+    { kind: "isobar", hpa: 1020, major: true },
+    { kind: "L", hpa: 1003, major: false },
+    { kind: "H", hpa: 1027, major: false },
+  ]);
+  // Coordinates survive untouched, including the un-cut antimeridian ones.
+  assert.deepEqual(out.features[1].geometry.coordinates, [[175, 60], [185, 61]]);
+  // The collection-level `valid_time` is not something the style reads.
+  assert.equal("valid_time" in out, false);
+});
+
+test("withPressureKinds drops anything a layer expression could choke on", () => {
+  const feature = (geometry, properties) => ({ type: "Feature", geometry, properties });
+  const out = withPressureKinds({
+    type: "FeatureCollection",
+    features: [
+      feature({ type: "LineString", coordinates: [[0, 0], [1, 1]] }, { kind: "isobar", hpa: "1008" }), // numeric string
+      feature({ type: "LineString", coordinates: [[0, 0], [1, 1]] }, { kind: "isobar", hpa: 1000 }),
+      feature({ type: "MultiLineString", coordinates: [[[0, 0], [1, 1]]] }, { kind: "isobar", hpa: 1004 }), // wrong geometry
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "L", hpa: 1002 }),
+      feature({ type: "MultiPoint", coordinates: [[0, 0]] }, { kind: "H", hpa: 1030 }), // wrong geometry
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "l", hpa: 999 }), // wrong case
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "front", hpa: 1 }), // unknown kind
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "L" }), // no hpa
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "L", hpa: null }), // null hpa
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "L", hpa: "hPa" }), // not a number
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "L", hpa: "  " }), // blank string
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "L", hpa: true }), // not a number
+      feature({ type: "Point", coordinates: [0, 0] }, { kind: "L", hpa: Number.NaN }), // not a number
+      feature({ type: "Point", coordinates: [0, 0] }, undefined), // no properties at all
+      undefined, // no feature at all
+    ],
+  });
+  assert.deepEqual(out.features.map((f) => [f.properties.kind, f.properties.hpa]), [
+    ["isobar", 1008],
+    ["isobar", 1000],
+    ["L", 1002],
+  ]);
+  // `major` is always a real boolean, never the string "true".
+  assert.equal(out.features[0].properties.major, false);
+  assert.deepEqual(withPressureKinds(undefined), { type: "FeatureCollection", features: [] });
+  assert.deepEqual(withPressureKinds({ type: "FeatureCollection" }), { type: "FeatureCollection", features: [] });
+});
+
+test("pressureStatus names what the fetched file is missing, and is quiet when it is whole", () => {
+  const isobars = { type: "FeatureCollection", features: [{ properties: { kind: "isobar" } }] };
+  const centers = { type: "FeatureCollection", features: [{ properties: { kind: "L" } }] };
+  const empty = { type: "FeatureCollection", features: [] };
+  assert.equal(pressureStatus(samplePressure, true, true), "");
+  assert.equal(pressureStatus(centers, true, false), ""); // isobars not asked for
+  assert.equal(pressureStatus(isobars, false, true), ""); // centres not asked for
+  assert.equal(pressureStatus(centers, false, true), "(isobars for this step)");
+  assert.equal(pressureStatus(isobars, true, false), "(centres for this step)");
+  assert.equal(pressureStatus(empty, true, true), "(isobars or centres for this step)");
+  assert.equal(pressureStatus(undefined, true, true), "(isobars or centres for this step)");
 });

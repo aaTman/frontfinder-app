@@ -306,9 +306,11 @@
     .class-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
     .class-row input[type="checkbox"] { accent-color: #3d6bff; }
     .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-    /* Optional overlays (currently just "Front lines"). The status text
-       only shows when the overlay is on but has nothing to draw. */
-    #front-lines-status { color: #8b90a0; font-size: 11px; }
+    /* Optional overlays ("Front lines", "Highs & lows", "Isobars"). The
+       status text only shows when the overlay is on but has nothing to
+       draw. #pressure-status serves both pressure boxes, which share one
+       file and therefore one status line. */
+    #front-lines-status, #pressure-status { color: #8b90a0; font-size: 11px; }
     #time-control {
       margin-top: 10px; border-top: 1px solid #2a2f3d; padding-top: 10px;
       display: none; /* shown once a run with >1 step is loaded */
@@ -530,6 +532,15 @@
         <input type="checkbox" id="front-lines-checkbox" />
         Front lines <span id="front-lines-status"></span>
       </label>
+      <label class="class-row" title="Blue H and red L marks at every analysed pressure centre, with its central pressure in hPa under the letter. Same per-step pressure file as the isobars.">
+        <input type="checkbox" id="pressure-centers-checkbox" />
+        Highs &amp; lows
+      </label>
+      <label class="class-row" title="Mean-sea-level pressure isobars every 4 hPa, with the 20 hPa multiples darker and thicker, labelled with hPa along the lines.">
+        <input type="checkbox" id="isobars-checkbox" />
+        Isobars
+      </label>
+      <div id="pressure-status"></div>
     </div>
     <div id="time-control">
       <div id="time-label">
@@ -750,6 +761,16 @@
       symbolImageName,
       symbolFilter,
       symbolPeriods,
+      pressureUrl,
+      withPressureKinds,
+      pressureStatus,
+      isobarFilter,
+      centerFilter,
+      isobarLabelFilter,
+      centerColorExpression,
+      PRESSURE_COLORS,
+      PRESSURE_FONT,
+      PRESSURE_FONT_BOLD,
     } from "./lib.js";
 
     // -----------------------------------------------------------------
@@ -1274,6 +1295,7 @@
       renderStepTicks(state, index);
       hideClickTooltip(); // last reading belongs to whatever was visible before
       refreshFrontLines(); // optional overlay: follows the step that is actually on screen
+      refreshPressure(); // ditto for the isobars/highs-lows overlay
     }
 
     function revealStep(state, index) {
@@ -1829,6 +1851,225 @@
       });
     }
 
+    // -----------------------------------------------------------------
+    // Optional "Highs & lows" and "Isobars" overlays. Both read the SAME
+    // per-step file -- the scheduler's mean-sea-level pressure product
+    // (isobar LineStrings plus one Point per pressure centre), listed as
+    // `pressure` on that step's latest.json entry -- so the two checkboxes
+    // share one GeoJSON source, one fetch, one LRU cache and one status
+    // line: either box on fetches, both off clear and nothing more is
+    // fetched. Off by default like the front lines; nothing is fetched
+    // until a box is on, and only the PRIMARY model's visible step is ever
+    // drawn. The class checkboxes do NOT apply here -- an isobar is not a
+    // front class -- and neither overlay touches the zarr layers.
+    //
+    // Isobar longitudes are never cut at the antimeridian (a low over the
+    // pole reads 175, 185), which MapLibre draws as one continuous line.
+    //
+    // Stack order: probability rasters at the bottom, then the pressure
+    // layers, then the front lines and their symbols on top (see
+    // raiseOverlays and the beforeId in ensurePressureLayers).
+    // -----------------------------------------------------------------
+    const PRESSURE_SOURCE = "pressure";
+    const PRESSURE_ISOBARS_LAYER = "pressure-isobars";
+    const PRESSURE_ISOBAR_LABELS_LAYER = "pressure-isobar-labels";
+    const PRESSURE_CENTERS_LAYER = "pressure-centers";
+    // Bottom-up. The hPa labels sit above their own lines but under the
+    // H/L marks, which are the first thing you read on a pressure chart.
+    const PRESSURE_LAYERS = [PRESSURE_ISOBARS_LAYER, PRESSURE_ISOBAR_LABELS_LAYER, PRESSURE_CENTERS_LAYER];
+    const PRESSURE_LABEL_MIN_ZOOM = 4; // below this, only the 20 hPa multiples get a label
+    const EMPTY_PRESSURE = { type: "FeatureCollection", features: [] };
+    const PRESSURE_CACHE_MAX = 12; // steps kept in memory (~50 kB each)
+    const pressureCache = new Map(); // url -> sanitized FeatureCollection, oldest first
+    let centersEnabled = false;
+    let isobarsEnabled = false;
+    let pressureToken = 0; // a newer refresh supersedes an older in-flight fetch
+
+    function setPressureStatus(text) {
+      document.getElementById("pressure-status").textContent = text;
+    }
+
+    function ensurePressureLayers() {
+      if (map.getSource(PRESSURE_SOURCE)) return;
+      map.addSource(PRESSURE_SOURCE, { type: "geojson", data: EMPTY_PRESSURE });
+      // addLayer with no beforeId appends to the top of the stack, which
+      // would put the isobars over an already-drawn front line. Inserting
+      // each one under the bottom-most front line layer keeps the typed
+      // lines and their symbols on top, whatever order the boxes got
+      // checked in.
+      const beforeId = map.getLayer(FRONT_LINE_LAYERS[0]) ? FRONT_LINE_LAYERS[0] : undefined;
+      // Thin slate lines over the probability rasters: `major` (the 20 hPa
+      // multiples) is the darker, heavier stroke, so the 1000/1020/1040
+      // lines read first. MapLibre allows only ONE zoom-based interpolate
+      // per paint expression, so the two widths are `case` outputs of a
+      // single zoom interpolate rather than two interpolates inside a case
+      // (the latter is rejected outright: "Only one zoom-based step or
+      // interpolate subexpression may be used in an expression").
+      const major = ["==", ["get", "major"], true];
+      map.addLayer(
+        {
+          id: PRESSURE_ISOBARS_LAYER, type: "line", source: PRESSURE_SOURCE, filter: isobarFilter(),
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": ["case", major, PRESSURE_COLORS.isobarMajor, PRESSURE_COLORS.isobar],
+            "line-opacity": ["case", major, 0.92, 0.62],
+            "line-width": ["interpolate", ["linear"], ["zoom"],
+              1, ["case", major, 1.2, 0.7],
+              6, ["case", major, 1.9, 1.1],
+              10, ["case", major, 2.7, 1.6]],
+          },
+        },
+        beforeId
+      );
+      map.addLayer(
+        {
+          id: PRESSURE_ISOBAR_LABELS_LAYER, type: "symbol", source: PRESSURE_SOURCE,
+          filter: isobarLabelFilter(PRESSURE_LABEL_MIN_ZOOM),
+          layout: {
+            "symbol-placement": "line",
+            "text-field": ["to-string", ["get", "hpa"]],
+            "text-font": PRESSURE_FONT,
+            "text-size": ["interpolate", ["linear"], ["zoom"], 1, 9, 6, 11, 10, 12],
+            "text-letter-spacing": 0.04,
+            // Isobars curve: MapLibre breaks a line-placed label when the
+            // angle between adjacent characters exceeds this, so it stays
+            // modest and the number never wraps around a bend.
+            "text-max-angle": 40,
+          },
+          paint: {
+            "text-color": PRESSURE_COLORS.label,
+            "text-halo-color": "#ffffff",
+            "text-halo-width": 1.3,
+            "text-halo-blur": 0.4,
+          },
+        },
+        beforeId
+      );
+      map.addLayer(
+        {
+          id: PRESSURE_CENTERS_LAYER, type: "symbol", source: PRESSURE_SOURCE, filter: centerFilter(),
+          layout: {
+            // One symbol per centre: a large bold H/L with the central
+            // pressure under it, in the same font so the two travel
+            // together (a "\n" section breaks the line).
+            "text-field": ["format",
+              ["get", "kind"], { "font-scale": 1 },
+              "\n", { "font-scale": 1 },
+              ["to-string", ["get", "hpa"]], { "font-scale": 0.55 }],
+            "text-font": PRESSURE_FONT_BOLD,
+            "text-size": ["interpolate", ["linear"], ["zoom"], 1, 13, 6, 18, 10, 22],
+            // Centres are few and are the point of the overlay, so they
+            // never yield to anything, not even each other.
+            "text-allow-overlap": true,
+            "text-ignore-placement": true,
+          },
+          paint: {
+            "text-color": centerColorExpression(),
+            // White halo, so the letters stay legible on top of a
+            // saturated probability blob as well as on the pale basemap.
+            "text-halo-color": "#ffffff",
+            "text-halo-width": 1.6,
+            "text-halo-blur": 0.4,
+          },
+        },
+        beforeId
+      );
+    }
+
+    // New zarr layers get added on top of the stack as steps get visited, so
+    // both overlays are re-raised after every addLayer: pressure first, then
+    // the front lines, which keeps the typed lines and their symbols the
+    // topmost thing on the map.
+    function raiseOverlays() {
+      for (const id of PRESSURE_LAYERS) if (map.getLayer(id)) map.moveLayer(id);
+      raiseFrontLines();
+    }
+
+    // The two checkboxes share one source and one file, so which of the three
+    // layers draws is a per-layer visibility rather than a filter: the isobar
+    // lines and their hPa labels follow the Isobars box, the H/L marks follow
+    // the Highs & lows box, and the data itself is whatever the file held.
+    function applyPressureVisibility() {
+      if (!map.getSource(PRESSURE_SOURCE)) return; // the three layers do not exist until ensurePressureLayers() has made them
+      const show = (on) => (on ? "visible" : "none");
+      map.setLayoutProperty(PRESSURE_ISOBARS_LAYER, "visibility", show(isobarsEnabled));
+      map.setLayoutProperty(PRESSURE_ISOBAR_LABELS_LAYER, "visibility", show(isobarsEnabled));
+      map.setLayoutProperty(PRESSURE_CENTERS_LAYER, "visibility", show(centersEnabled));
+    }
+
+    function clearPressure() {
+      map.getSource(PRESSURE_SOURCE)?.setData(EMPTY_PRESSURE);
+    }
+
+    async function fetchPressure(url) {
+      const cached = pressureCache.get(url);
+      if (cached) return cached;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      const collection = withPressureKinds(await res.json());
+      pressureCache.set(url, collection);
+      while (pressureCache.size > PRESSURE_CACHE_MAX) pressureCache.delete(pressureCache.keys().next().value);
+      return collection;
+    }
+
+    // Shows the isobars and/or centres for whatever step of the primary model
+    // is on screen (or clears them). Called when either checkbox changes, when
+    // a new step is revealed, and when new steps are published -- the same
+    // points refreshFrontLines() runs at.
+    async function refreshPressure() {
+      const token = ++pressureToken;
+      if (!centersEnabled && !isobarsEnabled) {
+        clearPressure();
+        setPressureStatus("");
+        return;
+      }
+      const state = modelStates.get(primaryModel);
+      const step = state?.activeSteps[state.visibleStepIndex];
+      if (!step) return; // nothing on screen yet; revealing a step calls this again
+      const url = pressureUrl(ZARR_ROOT, state.key, step);
+      if (!url) {
+        clearPressure();
+        setPressureStatus("(none for this step)");
+        return;
+      }
+      try {
+        const collection = await fetchPressure(url);
+        if (token !== pressureToken) return; // superseded while fetching
+        ensurePressureLayers();
+        applyPressureVisibility(); // either box may have changed since the layers were made
+        map.getSource(PRESSURE_SOURCE).setData(collection);
+        raiseOverlays();
+        // A file that arrived but has nothing for one of the two boxes says
+        // so instead of looking like a silent failure.
+        setPressureStatus(pressureStatus(collection, centersEnabled, isobarsEnabled));
+      } catch (err) {
+        if (token !== pressureToken) return;
+        console.error(err);
+        clearPressure();
+        setPressureStatus("(unavailable)");
+      }
+    }
+
+    function setupPressureToggles() {
+      const params = new URLSearchParams(location.search);
+      // ?hl=1 and ?isobars=1 open the page with either overlay already on
+      // (shareable link); both may be on at once.
+      centersEnabled = params.get("hl") === "1";
+      isobarsEnabled = params.get("isobars") === "1";
+      const centers = document.getElementById("pressure-centers-checkbox");
+      const isobars = document.getElementById("isobars-checkbox");
+      centers.checked = centersEnabled;
+      isobars.checked = isobarsEnabled;
+      centers.addEventListener("change", () => {
+        centersEnabled = centers.checked;
+        refreshPressure();
+      });
+      isobars.addEventListener("change", () => {
+        isobarsEnabled = isobars.checked;
+        refreshPressure();
+      });
+    }
+
     function buildModelToggles() {
       const container = document.getElementById("model-toggles");
       container.innerHTML = "";
@@ -2107,7 +2348,7 @@
           },
         });
         map.addLayer(layer);
-        raiseFrontLines(); // keep the optional front lines above the newly added raster layer
+        raiseOverlays(); // keep the optional overlays above the newly added raster layer
         stepLayers.set(cls, layer);
       }
       modelState.layersByStep.set(index, stepLayers);
@@ -2523,6 +2764,7 @@
           renderStepTicks(modelState);
         }
         refreshFrontLines(); // the on-screen step's entry may have gained a fronts file
+        refreshPressure(); // ... and/or a pressure file
       }, POLL_NEW_STEPS_MS);
     }
 
@@ -2773,6 +3015,7 @@
 
     buildClassToggles();
     setupFrontLinesToggle();
+    setupPressureToggles();
     buildModelToggles();
     buildLegend();
     setupPlayButton();

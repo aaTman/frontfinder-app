@@ -15,20 +15,20 @@
 // independent checkbox toggle, exactly the "secondary encoding" the skill
 // requires to accept the 6-8 CVD band.
 //
-// 2026-10-08: trough (#992288) and tropical_trough (#bb1111) added for
-// nbs_square_dilation_trof_tt_no_inst. The reference palette's remaining
-// slots (magenta/green/red) all collapse against aqua or orange under CVD
-// simulation, so these were searched for directly: every pair across all
-// seven classes stays >= 9.5 OKLab dE under normal, protan, deutan and
-// tritan simulation (trough alone >= 15.6), with OKLCH L ~0.48-0.50.
+// trough and tropical_trough (added for nbs_square_dilation_trof_tt_no_inst)
+// share one gray. Pure black would vanish against the dark surface and the
+// spline overlay, so gray stands in for black/brown. The two are told apart by
+// line style (trough dashed, tropical trough solid), not color. Warm is a true
+// red (#d62728) so it reads as a warm front; the CVD check above predates it
+// and the validator has not been re-run for the new warm color.
 export const CLASS_STYLE = {
   cold: { color: "#3987e5", label: "Cold" },
-  warm: { color: "#d95926", label: "Warm" },
+  warm: { color: "#d62728", label: "Warm" },
   stationary: { color: "#199e70", label: "Stationary" },
   occluded: { color: "#9085e9", label: "Occluded" },
   dryline: { color: "#c98500", label: "Dryline" },
-  trough: { color: "#992288", label: "Trough" },
-  tropical_trough: { color: "#bb1111", label: "Tropical trough" },
+  trough: { color: "#8c8c8c", label: "Trough" },
+  tropical_trough: { color: "#8c8c8c", label: "Tropical trough" },
 };
 
 // Raw-probability breakpoints for the filled-contour look. See index.html's
@@ -129,10 +129,10 @@ export const FRONT_LINE_CLASS_BY_NAME = {
 };
 
 // Troughs and drylines are not fronts in the strict sense; drawing them dashed
-// keeps the two readable apart where both are on at once (and when color alone
-// is not enough). MapLibre's `line-dasharray` cannot be data-driven, so these
-// get their own layer.
-export const DASHED_FRONT_LINE_CLASSES = ["dryline", "trough", "tropical_trough"];
+// marks them as such. Tropical troughs (waves) share the trough color, so they
+// stay solid to tell the two apart. MapLibre's `line-dasharray` cannot be
+// data-driven, so dashed classes get their own layer.
+export const DASHED_FRONT_LINE_CLASSES = ["dryline", "trough"];
 
 // Where a step's front-lines file lives, or null if this step has none
 // (cycles published before the feature, or a step whose lines failed).
@@ -266,4 +266,113 @@ export function symbolFilter(period, visibleClasses) {
 // The distinct tile widths, ascending.
 export function symbolPeriods() {
   return [...new Set(Object.values(FRONT_SYMBOL_PATTERNS).map((pattern) => pattern.period))].sort((a, b) => a - b);
+}
+
+// ---------------------------------------------------------------------------
+// Pressure overlays: highs/lows and isobars (the optional "Highs & lows" and
+// "Isobars" checkboxes).
+//
+// The scheduler contours mean-sea-level pressure for each step and writes one
+// GeoJSON per step -- isobar LineStrings (`kind: "isobar"`, `hpa`, `major` for
+// the 20 hPa multiples) plus one Point per pressure centre (`kind: "H"|"L"`,
+// `hpa`) -- and lists it as `pressure` on that step's latest.json entry. Both
+// overlays read that same file, which is why their map-side code shares one
+// source, one fetch and one status line. Pure helpers only here -- no DOM/map
+// access -- so lib.test.js can cover them.
+// ---------------------------------------------------------------------------
+
+// Where a step's pressure file lives, or null if this step has none (cycles
+// published before the feature, or a step whose product failed).
+export function pressureUrl(zarrRoot, modelKey, step) {
+  if (!step || typeof step.pressure !== "string" || step.pressure === "") return null;
+  return `${zarrRoot}/${modelKey}/${step.pressure}`;
+}
+
+// H blue / L red, the synoptic-chart convention. The isobar colors are a muted
+// slate: dark enough to read over the light basemap and over the saturated
+// (high-probability) end of the rasters, pale enough to sit under everything
+// else, with the 20 hPa multiples a shade darker so they read first.
+export const PRESSURE_COLORS = {
+  high: "#1f5fbf",
+  low: "#c0392b",
+  isobar: "#414d63",
+  isobarMajor: "#2b3446",
+  label: "#39424f",
+};
+
+// Glyph stacks the basemap's glyph server actually serves. The style is
+// OpenFreeMap positron (index.html's `style` URL), whose glyph endpoint is
+// https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf and whose own
+// label layers only ever ask for "Noto Sans Regular", "Noto Sans Italic" and
+// "Noto Sans Bold" (read from the style JSON). A stack the server does not
+// have 404s and the text silently never draws, so nothing else is allowed.
+export const PRESSURE_FONT = ["Noto Sans Regular"];
+export const PRESSURE_FONT_BOLD = ["Noto Sans Bold"];
+
+// The feature kinds these overlays know. Anything else in the file is ignored.
+export const PRESSURE_KINDS = ["isobar", "H", "L"];
+
+// Layer filters: the isobar lines/labels and the H/L centres come from the one
+// FeatureCollection, split by `kind`.
+export function isobarFilter() {
+  return ["==", ["get", "kind"], "isobar"];
+}
+
+export function centerFilter() {
+  return ["in", ["get", "kind"], ["literal", ["L", "H"]]];
+}
+
+// Filter for the isobar label layer. One label every 4 hPa is an unreadable
+// smear at world scale, so below `majorOnlyBelowZoom` only the 20 hPa
+// multiples are labeled; above it every isobar gets one. `zoom` is legal
+// inside a filter expression (unlike inside a paint expression), so this needs
+// no zoom-event listener of its own.
+export function isobarLabelFilter(majorOnlyBelowZoom) {
+  return ["all", isobarFilter(), ["any", ["==", ["get", "major"], true], [">=", ["zoom"], majorOnlyBelowZoom]]];
+}
+
+// MapLibre `text-color` expression for the H/L labels.
+export function centerColorExpression() {
+  return ["match", ["get", "kind"], "H", PRESSURE_COLORS.high, "L", PRESSURE_COLORS.low, PRESSURE_COLORS.label];
+}
+
+// Turns a feature's `hpa` into a plain number, or NaN for anything that is not
+// one. MapLibre's `to-string` throws on null, which takes the whole label layer
+// down rather than just the one label, so nothing downstream may ever see a
+// missing or non-numeric value.
+function pressureHpa(value) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.trim() !== "") return Number(value);
+  return NaN;
+}
+
+// Sanitizes a step's pressure file into what the map style reads: keeps only
+// recognized features (isobar LineStrings, L/H Points) and rewrites every one
+// to exactly `{kind, hpa, major}`, so no expression downstream can meet a
+// missing key or a non-numeric `hpa`. Anything else -- an unknown kind, a
+// geometry that is not the one its kind needs, an unusable `hpa` -- is
+// dropped. Returns a new FeatureCollection; the input is not modified.
+export function withPressureKinds(collection) {
+  const features = [];
+  for (const feature of collection?.features ?? []) {
+    const kind = feature?.properties?.kind;
+    if (!PRESSURE_KINDS.includes(kind)) continue;
+    const type = feature?.geometry?.type;
+    if (type !== (kind === "isobar" ? "LineString" : "Point")) continue;
+    const hpa = pressureHpa(feature.properties.hpa);
+    if (!Number.isFinite(hpa)) continue;
+    features.push({ type: "Feature", geometry: feature.geometry, properties: { kind, hpa, major: feature.properties.major === true } });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+// Status text for a pressure file that arrived but cannot serve one of the two
+// checkboxes: "" when both get something to draw. (A step with no file at all,
+// and a fetch that failed, are reported by the caller.)
+export function pressureStatus(collection, wantCenters, wantIsobars) {
+  const kinds = new Set((collection?.features ?? []).map((feature) => feature?.properties?.kind));
+  const missing = [];
+  if (wantIsobars && !kinds.has("isobar")) missing.push("isobars");
+  if (wantCenters && !kinds.has("H") && !kinds.has("L")) missing.push("centres");
+  return missing.length === 0 ? "" : `(${missing.join(" or ")} for this step)`;
 }

@@ -26,6 +26,7 @@ frontfinder/
   scheduler/retention.py deletes old zarr stores and cached downloads
   postprocess/splines.py      front-line (spline) extraction, vendored from ai2es/fronts
   postprocess/front_lines.py  per-step GeoJSON front lines for the viewer's optional overlay
+  postprocess/pressure.py     per-step GeoJSON MSLP isobars + H/L centres for the viewer's optional overlay
 webapp/
   index.html             maplibre-gl viewer
 deploy/
@@ -77,6 +78,23 @@ and 100 kB per step.
   Add `--fields-only` to write just the missing sidecars without touching
   `latest.json`: safe while a cycle is running, and the next scheduler process
   to publish a step re-derives the lines from them.
+
+## Pressure overlays (optional)
+
+The viewer has off-by-default **Highs & lows** and **Isobars** checkboxes that
+draw pressure centres and contour lines over the other layers. After each step
+is published, `run_cycle` writes `<model>/<cycle>_f<step>.pressure.geojson`
+next to the zarr store and lists it as `"pressure"` on that step's
+`latest.json` entry. The source is IFS mean sea level pressure (`msl`);
+surface pressure (`sp`) is fetched only to suppress false H/L centres over
+high terrain, where MSLP is an extrapolation rather than a barometer reading.
+Isobars are drawn every 4 hPa, with major lines every 20 hPa.
+
+- Failures here are logged and never affect inference or publishing.
+- `--no-pressure` turns generation off.
+- Retention prunes the files with their zarr stores.
+- Steps published before this ran have no pressure file; the viewer shows
+  "(none for this step)".
 
 ## Setup
 
