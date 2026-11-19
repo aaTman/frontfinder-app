@@ -44,7 +44,7 @@ The viewer fetches the on-screen step's file (primary model only; the last 12
 are kept in memory) when the box is on and a step is revealed, and again when
 new steps are polled in. A step with no `fronts` shows "(none for this step)".
 The class checkboxes apply to the lines and symbols too. Lines are colored like
-the probability layers; troughs and drylines are dashed.
+the probability layers; troughs and drylines are dashed, and tropical troughs are solid.
 
 **Symbols** follow the WPC convention: cold = triangles, warm = semicircles,
 occluded = both alternating on one side, stationary = blue triangles and orange
