@@ -376,3 +376,17 @@ export function pressureStatus(collection, wantCenters, wantIsobars) {
   if (wantCenters && !kinds.has("H") && !kinds.has("L")) missing.push("centres");
   return missing.length === 0 ? "" : `(${missing.join(" or ")} for this step)`;
 }
+
+// Initial state of one pressure checkbox on page load. Precedence: the URL
+// param first -- `"1"` on, `"0"` off -- so a shareable link reproduces
+// exactly what the sender saw, off included; then the value the browser
+// remembered (`"1"`/`"0"`); then the default (on). Anything unrecognised at
+// a level (null, "", "yes") falls through to the next one. Pure: the caller
+// reads the param and the stored value and does the storing.
+export function pressureInitialState(paramValue, storedValue, defaultOn = true) {
+  if (paramValue === "1") return true;
+  if (paramValue === "0") return false;
+  if (storedValue === "1") return true;
+  if (storedValue === "0") return false;
+  return defaultOn;
+}

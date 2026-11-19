@@ -726,6 +726,7 @@
       pressureUrl,
       withPressureKinds,
       pressureStatus,
+      pressureInitialState,
       isobarFilter,
       centerFilter,
       isobarLabelFilter,
@@ -1818,8 +1819,11 @@
     // `pressure` on that step's latest.json entry -- so the two checkboxes
     // share one GeoJSON source, one fetch, one LRU cache and one status
     // line: either box on fetches, both off clear and nothing more is
-    // fetched. Off by default like the front lines; nothing is fetched
-    // until a box is on, and only the PRIMARY model's visible step is ever
+    // fetched. Both are ON by default; the user's choices are remembered in
+    // localStorage (`pressureCenters` / `pressureIsobars`), and a URL param
+    // (?hl=1|0, ?isobars=1|0) overrides the remembered choice for that load
+    // without being stored. Nothing is fetched while both are off, and only
+    // the PRIMARY model's visible step is ever
     // drawn. The class checkboxes do NOT apply here -- an isobar is not a
     // front class -- and neither overlay touches the zarr layers.
     //
@@ -1841,8 +1845,8 @@
     const EMPTY_PRESSURE = { type: "FeatureCollection", features: [] };
     const PRESSURE_CACHE_MAX = 12; // steps kept in memory (~50 kB each)
     const pressureCache = new Map(); // url -> sanitized FeatureCollection, oldest first
-    let centersEnabled = false;
-    let isobarsEnabled = false;
+    let centersEnabled = true; // set from param/stored/default by setupPressureToggles
+    let isobarsEnabled = true;
     let pressureToken = 0; // a newer refresh supersedes an older in-flight fetch
 
     function setPressureStatus(text) {
@@ -2010,22 +2014,34 @@
       }
     }
 
+    // localStorage keys remembering the user's two choices across loads.
+    const PRESSURE_CENTERS_KEY = "pressureCenters";
+    const PRESSURE_ISOBARS_KEY = "pressureIsobars";
+
+    function readStoredChoice(key) {
+      try { return localStorage.getItem(key); } catch { return null; } // private window: default
+    }
+
     function setupPressureToggles() {
       const params = new URLSearchParams(location.search);
-      // ?hl=1 and ?isobars=1 open the page with either overlay already on
-      // (shareable link); both may be on at once.
-      centersEnabled = params.get("hl") === "1";
-      isobarsEnabled = params.get("isobars") === "1";
+      // Precedence on load: URL param (?hl / ?isobars, "1"/"0") wins so a
+      // shareable link reproduces what the sender saw, off included; else
+      // the remembered choice; else on. The param is never stored -- only
+      // the user's own toggling writes to localStorage below.
+      centersEnabled = pressureInitialState(params.get("hl"), readStoredChoice(PRESSURE_CENTERS_KEY));
+      isobarsEnabled = pressureInitialState(params.get("isobars"), readStoredChoice(PRESSURE_ISOBARS_KEY));
       const centers = document.getElementById("pressure-centers-checkbox");
       const isobars = document.getElementById("isobars-checkbox");
       centers.checked = centersEnabled;
       isobars.checked = isobarsEnabled;
       centers.addEventListener("change", () => {
         centersEnabled = centers.checked;
+        try { localStorage.setItem(PRESSURE_CENTERS_KEY, centersEnabled ? "1" : "0"); } catch {}
         refreshPressure();
       });
       isobars.addEventListener("change", () => {
         isobarsEnabled = isobars.checked;
+        try { localStorage.setItem(PRESSURE_ISOBARS_KEY, isobarsEnabled ? "1" : "0"); } catch {}
         refreshPressure();
       });
     }
