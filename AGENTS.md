@@ -16,7 +16,7 @@ Batch inference and zarr serving pipeline for ESPR's Fronts product. Every IFS c
 - Deploy: `just deploy` (stub).
 
 ## Conventions
-- Python style: type hints, short docstrings. Branching: one worktree per task, PRs into main, CI must pass.
+- Python style: type hints, short docstrings. Branching: `main` is stable and only receives merges from `dev` for releases, each tagged `vMAJOR.MINOR.PATCH` (bump `version` in `pyproject.toml` to match). `dev` is the integration branch. One worktree per task on `feature/<name>` or `fix/<name>`, branched from `dev`, PRs into `dev`, CI must pass.
 - Never commit data, keys, model weights, `output/` or `ifs_cache/`.
 - A running cycle keeps the module versions it loaded; new code applies to the next scheduler process.
 - `test_run_cycle_dispatches_models_concurrently_when_devices_differ` is wall-clock based and flakes under live load; rerun it alone before suspecting a regression.
