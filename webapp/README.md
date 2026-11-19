@@ -66,6 +66,51 @@ map-side code in `index.html` was checked in headless Chromium (globe
 projection, slider, class toggles, on/off), which caught a bug the unit tests
 cannot: MapLibre rejects `zoom` inside a `+` expression.
 
+## Pressure overlays (optional)
+
+Two more checkboxes in the same **Overlays** group, each off by default and
+each shareable as a URL param: **Highs & lows** (`?hl=1`) draws a bold blue `H`
+or red `L` at every pressure centre with its central pressure in hPa under it,
+and **Isobars** (`?isobars=1`) draws the mean-sea-level isobars as thin slate
+lines -- every 4 hPa, with the 20 hPa multiples (`major: true`) darker,
+thicker and more opaque -- labelled with hPa along the lines. Nothing is
+fetched until one of them is on; either box on fetches, both off clears the
+source and stops fetching, and both read the **same** file, so they share one
+GeoJSON source, one cache (the last 12 steps), one superseding fetch token and
+one status line (`#pressure-status`). The two layers of isobars and the H/L
+marks each take their `visibility` from their own box, so checking one shows
+only that one even though the shared source holds both. Like the front lines,
+only the PRIMARY model's visible step is ever drawn, and the class checkboxes do
+not apply (an isobar is not a front class).
+
+Data: each `latest.json` step entry may carry
+`"pressure": "<cycle>_f<step>.pressure.geojson"`, served at
+`${ZARR_ROOT}/${modelKey}/${step.pressure}` -- a sibling of the `fronts` key.
+The file is a `FeatureCollection` of isobar `LineString`s
+(`{"kind":"isobar","hpa":1008,"major":false}`) and centre `Point`s
+(`{"kind":"L","hpa":1003}`). Isobar longitudes are never cut at 180 degrees (a
+low over the pole reads 175, 185), which MapLibre draws as one line. A step
+with no `pressure` key shows "(none for this step)"; a file that arrives but
+has nothing for one of the two boxes says which.
+
+Three layers on the `pressure` source, in this bottom-up order:
+`pressure-isobars` (line), `pressure-isobar-labels` (symbol, `symbol-placement:
+line`; below zoom 4 only the 20 hPa multiples are labelled, because one label
+every 4 hPa is a smear at world scale), and `pressure-centers` (symbol, one
+`format` text with the letter and the hPa stacked). They sit above the
+probability rasters and below the front lines: `raiseOverlays()` (which replaces
+the old `raiseFrontLines()` call after every new zarr layer) raises the pressure
+layers first and the front lines second, and `ensurePressureLayers()` inserts
+with `beforeId` so checking a pressure box while the front lines are already
+drawn cannot put the isobars on top of them. Both symbol layers use the
+basemap's own glyph stacks (`Noto Sans Bold` / `Noto Sans Regular`); a stack the
+OpenFreeMap glyph server does not have 404s and the text never draws.
+
+`lib.js` holds the pure parts (`pressureUrl`, `withPressureKinds`,
+`isobarFilter`, `centerFilter`, `isobarLabelFilter`, `centerColorExpression`,
+`pressureStatus`, `PRESSURE_COLORS`/`PRESSURE_FONT*`), covered by
+`lib.test.js`.
+
 ## Colors, bin math, and tests (`lib.js`)
 
 2026-08-21: `CLASS_STYLE` (the per-class hex colors), the `FRONT_*` bin
