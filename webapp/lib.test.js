@@ -35,6 +35,7 @@ import {
   centerColorExpression,
   withPressureKinds,
   pressureStatus,
+  pressureInitialState,
 } from "./lib.js";
 
 test("hexToRgb01 converts pure primaries and grays", () => {
@@ -426,4 +427,28 @@ test("pressureStatus names what the fetched file is missing, and is quiet when i
   assert.equal(pressureStatus(isobars, true, false), "(centres for this step)");
   assert.equal(pressureStatus(empty, true, true), "(isobars or centres for this step)");
   assert.equal(pressureStatus(undefined, true, true), "(isobars or centres for this step)");
+});
+
+test("pressureInitialState: param wins (off included), then stored, then default on", () => {
+  // The URL param beats everything, "0" included, so a shared link
+  // reproduces exactly what the sender saw.
+  assert.equal(pressureInitialState("1", "0"), true);
+  assert.equal(pressureInitialState("0", "1"), false);
+  assert.equal(pressureInitialState("0", null), false);
+  assert.equal(pressureInitialState("1", null), true);
+  // No usable param: the remembered choice decides.
+  assert.equal(pressureInitialState(null, "1"), true);
+  assert.equal(pressureInitialState(null, "0"), false);
+  assert.equal(pressureInitialState(undefined, "0"), false);
+  // Neither param nor stored value (fresh page): on.
+  assert.equal(pressureInitialState(null, null), true);
+  assert.equal(pressureInitialState(undefined, undefined), true);
+  // Garbage at one level falls through to the next, not to the default.
+  assert.equal(pressureInitialState("yes", "0"), false);
+  assert.equal(pressureInitialState("", "0"), false);
+  assert.equal(pressureInitialState("2", "on"), true); // garbage param AND garbage stored -> default
+  assert.equal(pressureInitialState("true", undefined), true);
+  // An explicit default is honoured when nothing else applies.
+  assert.equal(pressureInitialState(null, null, false), false);
+  assert.equal(pressureInitialState(null, "1", false), true);
 });

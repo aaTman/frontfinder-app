@@ -68,13 +68,17 @@ cannot: MapLibre rejects `zoom` inside a `+` expression.
 
 ## Pressure overlays (optional)
 
-Two more checkboxes in the same **Overlays** group, each off by default and
-each shareable as a URL param: **Highs & lows** (`?hl=1`) draws a bold blue `H`
+Two more checkboxes in the same **Overlays** group, both **on** by default and
+each overridable per load by a URL param: **Highs & lows** (`?hl=1`/`?hl=0`)
+draws a bold blue `H`
 or red `L` at every pressure centre with its central pressure in hPa under it,
-and **Isobars** (`?isobars=1`) draws the mean-sea-level isobars as thin slate
+and **Isobars** (`?isobars=1`/`?isobars=0`) draws the mean-sea-level isobars as thin slate
 lines -- every 4 hPa, with the 20 hPa multiples (`major: true`) darker,
-thicker and more opaque -- labelled with hPa along the lines. Nothing is
-fetched until one of them is on; either box on fetches, both off clears the
+thicker and more opaque -- labelled with hPa along the lines. The URL param
+wins over what the browser remembered (a shareable link reproduces what the
+sender saw, off included) but is never stored; toggling a box remembers the
+choice in `localStorage` (`pressureCenters` / `pressureIsobars`).
+Nothing is fetched until one of them is on; either box on fetches, both off clears the
 source and stops fetching, and both read the **same** file, so they share one
 GeoJSON source, one cache (the last 12 steps), one superseding fetch token and
 one status line (`#pressure-status`). The two layers of isobars and the H/L
