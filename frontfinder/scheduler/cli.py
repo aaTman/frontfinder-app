@@ -254,6 +254,19 @@ def main(argv: list[str] | None = None) -> int:
             "are uncalibrated; tune this against what the overlay looks like."
         ),
     )
+    parser.add_argument(
+        "--pressure",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "also write <store>.pressure.geojson next to the zarr store (MSLP "
+            "isobars every 4 hPa, plus H/L centres) from IFS mean sea level "
+            "pressure, listed in latest.json as `pressure`, for the webapp's "
+            "optional 'Highs & lows' and 'Isobars' overlays (default: on; "
+            "--no-pressure to skip). A failure here never affects inference "
+            "or publishing."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -307,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output_root,
         front_lines=args.front_lines,
         front_line_threshold=args.front_line_threshold,
+        pressure=args.pressure,
     )
     logger.info(
         "cycle %s-%02dZ complete: %s",

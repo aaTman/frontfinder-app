@@ -109,3 +109,32 @@ def test_cycle_is_complete_true_once_every_target_step_lands(tmp_path):
     for step in target_steps_for_cycle(6):  # 06Z caps at 144h -- see ecmwf_ifs.py
         _touch_store(output_root, "theta-e_uv_q", "2026-09-01", 6, step=step)
     assert _cycle_is_complete(output_root, "theta-e_uv_q", "2026-09-01", 6)
+
+
+def _run_main_kwargs(monkeypatch, tmp_path, argv):
+    """Run cli.main with the model-loading, source-construction and the
+    run_cycle call itself stubbed out -- the real ones need Keras weights and
+    the network -- and return the kwargs main passed to run_cycle."""
+    import frontfinder.scheduler.cli as cli
+
+    captured: dict = {}
+
+    def fake_run_cycle(run_configs, source, cycle_date, run_hour, output_root, **kwargs):
+        captured.update(kwargs)
+        return {"theta-e_uv_q": ["store"]}
+
+    monkeypatch.setattr(cli, "run_cycle", fake_run_cycle)
+    monkeypatch.setattr(cli, "build_run_configs", lambda model_dir: [])
+    monkeypatch.setattr(cli, "EcmwfOpenDataSource", lambda **kwargs: object())
+    assert cli.main(
+        ["--model-dir", str(tmp_path / "models"), "--output-root", str(tmp_path / "out"), *argv]
+    ) == 0
+    return captured
+
+
+def test_cli_pressure_overlay_defaults_on(tmp_path, monkeypatch):
+    assert _run_main_kwargs(monkeypatch, tmp_path, [])["pressure"] is True
+
+
+def test_cli_no_pressure_flag_skips_the_pressure_layer(tmp_path, monkeypatch):
+    assert _run_main_kwargs(monkeypatch, tmp_path, ["--no-pressure"])["pressure"] is False

@@ -205,6 +205,24 @@ def test_prune_old_output_stores_also_prunes_orientation_field_sidecars(tmp_path
         assert os.path.exists(os.path.join(model_dir, name)) == (not pruned)
 
 
+def test_prune_old_output_stores_also_prunes_pressure_geojson_by_the_same_cutoff(tmp_path):
+    root = str(tmp_path)
+    model_dir = os.path.join(root, "m")
+    os.makedirs(model_dir)
+    names = {
+        "2026-08-01T00Z_f006.pressure.geojson": True,
+        "2026-08-20T18Z_f006.pressure.geojson": False,
+        "other.pressure.geojson": False,
+    }
+    for name in names:
+        with open(os.path.join(model_dir, name), "w") as f:
+            f.write("{}")
+    deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
+    assert deleted == [os.path.join(model_dir, "2026-08-01T00Z_f006.pressure.geojson")]
+    for name, pruned in names.items():
+        assert os.path.exists(os.path.join(model_dir, name)) == (not pruned)
+
+
 def test_prune_old_output_stores_also_prunes_probabilities_sidecars(tmp_path):
     root = str(tmp_path)
     model_dir = os.path.join(root, "m")
