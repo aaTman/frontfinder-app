@@ -276,11 +276,37 @@ NBS_SQUARE_DILATION_TROF_TT_MANIFEST = ModelManifest(
     served_classes=TROF_TT_SERVED_CLASSES,
 )
 
+# Added 2026-11-17, replaces NBS_SQUARE_DILATION_TROF_TT_MANIFEST as the served
+# model. Same architecture, classes, and `nbs_loss` (read off the saved
+# compile_config) as that model, retrained without 2 m dewpoint: Input
+# batch_shape [None, None, None, 27] = 24 level-major pressure channels, then
+# 10m u, 10m v, geopotential_at_surface. Verified against the .keras file's
+# baked-in Rescaling layer: its 3 single-level columns have implied ranges
+# matching 10m u (~-37..36), 10m v (~-35..36) and surface geopotential
+# (~-905..34175 m2/s2), and the 2 m dewpoint column (~206-304 K) that the
+# previous model had is gone.
+# Served name == the release tag of this model's commit on ai2es/master. It is
+# also the output directory name and the key the webapp fetches
+# (`/data/<name>/latest.json`), so bump it with a new model, not the weights
+# filename.
+MODEL_VERSION_NO_DEWPOINT = "v2.0.1"
+
+NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST = ModelManifest(
+    name=MODEL_VERSION_NO_DEWPOINT,
+    weights_filename="nbs_square_dilation_trof_tt_no_inst_no_dewpoint.keras",
+    variables=tuple(
+        v for v in SPIX_WCE_DILATION_MANIFEST.variables if v.name != "2m_dewpoint_temperature"
+    ),
+    all_classes=TROF_TT_CLASSES,
+    served_classes=TROF_TT_SERVED_CLASSES,
+)
+
 MANIFESTS: dict[str, ModelManifest] = {
     THETA_E_UV_Q_MANIFEST.name: THETA_E_UV_Q_MANIFEST,
     MODEL_1702_MANIFEST.name: MODEL_1702_MANIFEST,
     SPIX_WCE_DILATION_MANIFEST.name: SPIX_WCE_DILATION_MANIFEST,
     NBS_SQUARE_DILATION_TROF_TT_MANIFEST.name: NBS_SQUARE_DILATION_TROF_TT_MANIFEST,
+    NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST.name: NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST,
 }
 
 

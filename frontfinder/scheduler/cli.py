@@ -30,7 +30,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
-from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_MANIFEST  # MODEL_1702_MANIFEST -- see module docstring
+from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST  # MODEL_1702_MANIFEST -- see module docstring
 from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, IFSCycle, target_steps_for_cycle
 from frontfinder.inference.engine import KerasPredictor
 from frontfinder.scheduler.retention import prune_old_cache_files, prune_old_output_stores
@@ -162,12 +162,14 @@ def _cycles_after(after: tuple[str, int] | None, current: tuple[str, int]) -> li
 
 def build_run_configs(model_dir: str) -> list[ModelRunConfig]:
     return [
-        # 2026-10-08: replaced theta-e_uv_q (_best_loss.keras) as the served
-        # model. Its manifest is still in config/manifests.py.
+        # 2026-11-17: replaced nbs_square_dilation_trof_tt_no_inst (which
+        # replaced theta-e_uv_q on 2026-10-08) as the served model -- same
+        # network retrained without 2 m dewpoint. Earlier manifests are still
+        # in config/manifests.py.
         ModelRunConfig(
-            manifest=NBS_SQUARE_DILATION_TROF_TT_MANIFEST,
+            manifest=NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST,
             predictor=KerasPredictor(
-                os.path.join(model_dir, NBS_SQUARE_DILATION_TROF_TT_MANIFEST.weights_filename)
+                os.path.join(model_dir, NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST.weights_filename)
             ),
         ),
         # model_1702 disabled -- see module docstring for why. Re-add once

@@ -7,6 +7,7 @@ from frontfinder.config.manifests import (
     THETA_E_UV_Q_MANIFEST,
     MODEL_1702_MANIFEST,
     NBS_SQUARE_DILATION_TROF_TT_MANIFEST,
+    NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST,
     ModelManifest,
     VariableSpec,
     get_manifest,
@@ -200,3 +201,18 @@ def test_nbs_trof_tt_class_indices_match_saved_metric_indices():
     assert m.served_class_indices() == [1, 2, 3, 4, 5, 6, 7]
     assert "instability" not in m.served_classes
     assert get_manifest("nbs_square_dilation_trof_tt_no_inst") is m
+
+
+def test_nbs_trof_tt_no_dewpoint_is_flat_27_channels_without_dewpoint():
+    # nbs_square_dilation_trof_tt_no_inst_no_dewpoint.keras: Input batch_shape
+    # [None, None, None, 27]; same 9 classes as the dewpoint model.
+    m = NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST
+    assert m.n_channels == 27
+    assert not m.volumetric
+    names = m.channel_names()
+    assert names[-3:] == ["10m_u_component_of_wind", "10m_v_component_of_wind", "geopotential_at_surface"]
+    assert "2m_dewpoint_temperature" not in names
+    assert names[:-3] == NBS_SQUARE_DILATION_TROF_TT_MANIFEST.channel_names()[:-4]
+    assert m.all_classes == NBS_SQUARE_DILATION_TROF_TT_MANIFEST.all_classes
+    assert m.served_classes == NBS_SQUARE_DILATION_TROF_TT_MANIFEST.served_classes
+    assert get_manifest("v2.0.1") is m

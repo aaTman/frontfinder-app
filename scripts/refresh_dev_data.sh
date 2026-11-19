@@ -12,7 +12,7 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/srv/frontfinder-app}"
-MODEL="${MODEL:-nbs_square_dilation_trof_tt_no_inst}"
+MODEL="${MODEL:-v2.0.1}"
 
 cd "$APP_DIR"
 exec uv run python scripts/requantize_store.py --skip-existing --prune \
