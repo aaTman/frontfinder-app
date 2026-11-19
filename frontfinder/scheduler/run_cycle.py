@@ -103,6 +103,7 @@ def run_one_model(
     cycle: IFSCycle,
     output_root: str,
     save_orientation_fields: bool = False,
+    save_pressure: bool = False,
 ) -> str:
     """Runs one model end-to-end for one (cycle, step). Returns the zarr
     store path written. Does NOT write latest.json -- that's `run_cycle`'s
@@ -178,7 +179,48 @@ def run_one_model(
             save_fields(orientation_fields, os.path.join(os.path.dirname(store_path), fields_filename(store_name)))
         except Exception:
             logger.exception("could not save orientation fields for %s -- continuing without", store_path)
+    if save_pressure:
+        # Runs AFTER the store write and the orientation sidecar on purpose:
+        # the pressure layer is an optional extra and must never delay or
+        # break the store itself.
+        _write_pressure_layer(source, cycle, store_path)
     return store_path
+
+
+def _write_pressure_layer(source: IFSFieldSource, cycle: IFSCycle, store_path: str) -> None:
+    """Best effort: write the step's MSLP pressure overlay (isobars + H/L
+    centres, see postprocess/pressure.py) as `<store>.pressure.geojson` next
+    to `store_path`. Never raises -- the overlay is optional and inference
+    and publishing must not depend on it."""
+    try:
+        from frontfinder.postprocess import pressure
+
+        store_name = os.path.basename(store_path)
+        model_dir = os.path.dirname(store_path)
+        if os.path.exists(os.path.join(model_dir, pressure.pressure_filename(store_name))):
+            # A resumed cycle lands here for steps whose store was already
+            # written too; rewriting a file that is already correct is waste.
+            return
+        mslp = source.fetch_single_level("mean_sea_level_pressure", cycle)
+        surface_pressure = None
+        try:
+            # Surface pressure only improves the H/L PLACEMENT (it drops
+            # centres over high terrain, where MSLP is an extrapolation) --
+            # not worth losing the isobars over, so it fails on its own.
+            surface_pressure = source.fetch_single_level("surface_pressure", cycle)
+        except Exception:
+            logger.exception("no surface_pressure for %s -- placing centres from MSLP alone", store_name)
+        pressure.write_pressure_layer(
+            model_dir,
+            store_name,
+            mslp,
+            source.lat,
+            source.lon,
+            _valid_time(cycle),
+            surface_pressure_pa=surface_pressure,
+        )
+    except Exception:
+        logger.exception("could not write the pressure layer for %s -- continuing without", store_path)
 
 
 def _store_name(cycle: IFSCycle) -> str:
@@ -234,6 +276,7 @@ def run_cycle(
     steps: tuple[int, ...] | None = None,
     front_lines: bool = False,
     front_line_threshold: float | None = None,
+    pressure: bool = False,
 ) -> dict[str, list[str]]:
     """Runs every configured model across every step this cycle publishes
     (default: `target_steps_for_cycle(run_hour)`, i.e. every 6h out to 240h
@@ -327,6 +370,13 @@ def run_cycle(
     carry on exactly as without it. `front_line_threshold` overrides the
     summed-probability threshold for a front's crest (the splines default
     otherwise).
+
+    `pressure` (off by default here; the CLI turns it on) additionally writes
+    the step's MSLP pressure overlay (`postprocess.pressure`): isobars and H/L
+    centres as `<store>.pressure.geojson` next to the zarr store, listed as a
+    `"pressure"` key on that step's `latest.json` entry, for the webapp's
+    optional "Highs & lows" and "Isobars" overlays. Like front lines it never
+    changes the zarr stores, and any failure there is logged and swallowed.
     """
     if steps is None:
         steps = target_steps_for_cycle(run_hour)
@@ -362,9 +412,17 @@ def run_cycle(
             # write_front_pyramid's mode="w", right before logging
             # "wrote ...").
             logger.info("model %s step %s already written for cycle %s -- skipping re-run", manifest_name, step, cycle)
+            if pressure:
+                # A resumed cycle still owes this skipped step its pressure
+                # layer; a no-op when the file is already on disk.
+                _write_pressure_layer(source, cycle, existing_store_path)
             return manifest_name, existing_store_path
         try:
-            extra = {"save_orientation_fields": True} if front_lines else {}
+            extra = {}
+            if front_lines:
+                extra["save_orientation_fields"] = True
+            if pressure:
+                extra["save_pressure"] = True
             return manifest_name, run_one_model(run_config, source, cycle, output_root, **extra)
         except Exception:
             logger.exception("model %s failed for cycle %s -- skipping this step", manifest_name, cycle)
@@ -393,6 +451,15 @@ def run_cycle(
                 attach_front_lines(
                     os.path.join(output_root, manifest_name), step_entries[manifest_name], front_line_config
                 )
+            if pressure:
+                try:
+                    from frontfinder.postprocess.pressure import attach_pressure
+
+                    # Points each entry at its pressure file if one exists (and
+                    # drops a stale key if not); never raises.
+                    attach_pressure(os.path.join(output_root, manifest_name), step_entries[manifest_name])
+                except Exception:
+                    logger.exception("pressure layers unavailable for %s -- continuing without them", manifest_name)
             # Publish as soon as this step lands, not after the whole cycle
             # -- see the postmortem above.
             _write_latest_pointer(

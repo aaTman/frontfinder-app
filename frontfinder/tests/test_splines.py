@@ -57,6 +57,76 @@ def mask_from(pixels: list[tuple[int, int]]) -> np.ndarray:
     return mask
 
 
+# The point a wave cyclone's cold, warm and occluded arms meet at, with one arm each way from it: the cold
+# arm toward the southwest, the warm arm toward the east, the occluded arm toward the west-northwest.
+MEET = (255.0, 40.0)
+Y_ARMS: dict[str, list[tuple[float, float]]] = {
+    "CF": [MEET, (245.0, 28.0)],
+    "WF": [MEET, (280.0, 38.0)],
+    "OF": [MEET, (240.0, 43.0)],
+}
+
+
+def y_probabilities(of_arm: list[tuple[float, float]] | None = None) -> xr.Dataset:
+    """Probabilities for three fronts meeting at one point, the Y junction every junction test uses."""
+    arms = dict(Y_ARMS, OF=of_arm) if of_arm is not None else Y_ARMS
+    return probabilities(**{name: ridge(points) for name, points in arms.items()})
+
+
+def y_crest() -> list[np.ndarray]:
+    """The traced crest of the Y fixture, the lines every junction test is drawn along."""
+    probs = y_probabilities()
+    total = np.sum([np.nan_to_num(probs[name].values) for name in Y_ARMS], axis=0)
+    mask = splines.crest_mask(total, CONFIG.threshold, periodic=splines.is_periodic(LON))
+    return splines.trace_paths(mask, LAT, LON, CONFIG.min_length_km, CONFIG.min_branch_km)[0]
+
+
+def line_polyline(line: list[splines.FrontSection]) -> tuple[np.ndarray, np.ndarray]:
+    """Every point of a line, its sections joined up end to end."""
+    return np.concatenate([s.lon for s in line]), np.concatenate([s.lat for s in line])
+
+
+def line_endpoints(boundary: splines.FrontBoundary) -> list[tuple[float, float]]:
+    """The first and last point of each of a boundary's lines."""
+    ends = []
+    for line in boundary.lines:
+        line_lon, line_lat = line_polyline(line)
+        ends.append((float(line_lon[0]), float(line_lat[0])))
+        ends.append((float(line_lon[-1]), float(line_lat[-1])))
+    return ends
+
+
+def distance_to_polyline(lon: float, lat: float, poly_lon: np.ndarray, poly_lat: np.ndarray) -> float:
+    """Return how far a point is from the closest part of a polyline, in km."""
+    east = np.radians(poly_lon - lon) * splines.EARTH_RADIUS_KM * np.cos(np.radians(lat))
+    north = np.radians(poly_lat - lat) * splines.EARTH_RADIUS_KM
+    de, dn = np.diff(east), np.diff(north)
+    span = np.where(de**2 + dn**2 > 0.0, de**2 + dn**2, 1.0)
+    step = np.clip(-(east[:-1] * de + north[:-1] * dn) / span, 0.0, 1.0)
+    return float(np.min(np.hypot(east[:-1] + step * de, north[:-1] + step * dn)))
+
+
+def point_km_along(lon: np.ndarray, lat: np.ndarray, from_start: bool, km: float) -> tuple[float, float]:
+    """Return the point about ``km`` along a line from one of its ends."""
+    dist = np.concatenate([[0.0], np.cumsum(splines.haversine_km(lon[:-1], lat[:-1], lon[1:], lat[1:]))])
+    if not from_start:
+        lon, lat, dist = lon[::-1], lat[::-1], dist[-1] - dist[::-1]
+    i = int(np.argmin(np.abs(dist - km)))
+    return float(lon[i]), float(lat[i])
+
+
+def turn_at_deg(before: tuple[float, float], at: tuple[float, float], after: tuple[float, float]) -> float:
+    """Return how far (degrees) a line turns at a point, read from the legs either side of it."""
+    def leg(point: tuple[float, float]) -> tuple[float, float]:
+        east = (point[0] - at[0]) * np.cos(np.radians(at[1])) * splines.KM_PER_DEG
+        return east, (point[1] - at[1]) * splines.KM_PER_DEG
+
+    coming = tuple(-value for value in leg(before))  # the direction of travel arriving at the point
+    going = leg(after)  # and leaving it
+    cos = (coming[0] * going[0] + coming[1] * going[1]) / (np.hypot(*coming) * np.hypot(*going))
+    return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+
+
 # --- crest_mask ---
 
 
@@ -113,6 +183,20 @@ def test_trace_paths_opens_loops() -> None:
 def test_trace_paths_drops_short_crests() -> None:
     crests = splines.trace_paths(mask_from([(10, c) for c in range(5)]), LAT, LON, min_length_km=250.0)
     assert crests == []
+
+
+def test_trace_paths_min_branch_km_keeps_short_attached_branch() -> None:
+    # A ~195 km branch off a ~1000 km line, and a detached crest of the same length well away from it.
+    pixels = [(100, c) for c in range(0, 61)] + [(r, 30) for r in range(101, 108)] + [(r, 55) for r in range(20, 28)]
+    crests = splines.trace_paths(mask_from(pixels), LAT, LON, min_length_km=250.0, min_branch_km=150.0)
+    assert [len(path) for path in crests[0]] == [61, 8]
+    assert tuple(crests[0][1][0]) == (100, 30)
+    # Without the extra setting a branch is held to the same length as a whole crest, and the detached
+    # crest is too short for either setting, so neither shows up twice.
+    for kwargs in ({}, {"min_branch_km": 250.0}):
+        strict = splines.trace_paths(mask_from(pixels), LAT, LON, min_length_km=250.0, **kwargs)
+        assert [len(path) for path in strict[0]] == [61]
+        assert len(strict) == 1
 
 
 # --- geometry helpers ---
@@ -354,6 +438,222 @@ def test_to_geojson_starts_each_line_inside_minus_180_to_180() -> None:
     overall = splines.to_geojson([splines.FrontBoundary([[section]])])["features"][0]
     (part,) = overall["geometry"]["coordinates"]
     np.testing.assert_allclose(np.array(part)[:, 0], [-10.0, -5.0, 5.0])
+
+
+def seam_y_probabilities() -> xr.Dataset:
+    """The junction fixture wrapped around the 0/360 edge of a global grid, meeting at 358E."""
+    arms = {
+        "CF": [(358.0, 40.0), (348.0, 28.0)],
+        "WF": [(358.0, 40.0), (383.0, 38.0)],  # the warm arm carries on past the edge, to 23E
+        "OF": [(358.0, 40.0), (343.0, 43.0)],
+    }
+    return xr.Dataset(
+        {
+            name: (
+                ["latitude", "longitude"],
+                np.maximum(ridge(points, lon=GLOBAL_LON), ridge(points, lon=GLOBAL_LON + 360.0)),
+            )
+            for name, points in arms.items()
+        },
+        coords={"latitude": LAT, "longitude": GLOBAL_LON},
+    )
+
+
+def test_y_junction_across_the_seam_keeps_one_vertex() -> None:
+    (boundary,) = splines.extract_fronts(seam_y_probabilities(), CONFIG)
+    assert len(boundary.lines) == 3
+    for line in boundary.lines:
+        line_lon, line_lat = line_polyline(line)
+        assert np.all(np.abs(np.diff(line_lon)) < 1.0)  # no line jumps the width of the grid
+    # Lines are unwrapped one at a time, so the vertex the arms share is the same place on Earth even when
+    # the lines name it 360 degrees apart.
+    ends = [p for p in line_endpoints(boundary) if splines.haversine_km(p[0], p[1], 356.8, 40.0) < 60.0]
+    assert len(ends) == 3
+    for lon, lat in ends[1:]:
+        assert float(splines.haversine_km(lon, lat, ends[0][0], ends[0][1])) < 1e-6
+
+
+def line_end_at(line: list[splines.FrontSection], at: tuple[float, float]) -> bool:
+    """Return whether a line's end nearest a point is its first one."""
+    line_lon, line_lat = line_polyline(line)
+    return bool(
+        splines.haversine_km(line_lon[0], line_lat[0], at[0], at[1])
+        < splines.haversine_km(line_lon[-1], line_lat[-1], at[0], at[1])
+    )
+
+
+def outer_section(
+    line: list[splines.FrontSection], at: tuple[float, float]
+) -> tuple[tuple[float, float], splines.FrontSection]:
+    """Return a line's end farthest from a point, and the section that end belongs to."""
+    line_lon, line_lat = line_polyline(line)
+    if line_end_at(line, at):
+        return (float(line_lon[-1]), float(line_lat[-1])), line[-1]
+    return (float(line_lon[0]), float(line_lat[0])), line[0]
+
+
+def junction_vertex(boundary: splines.FrontBoundary) -> tuple[float, float]:
+    """Return the endpoint of a boundary closest to where its arms meet."""
+    return min(line_endpoints(boundary), key=lambda p: float(splines.haversine_km(p[0], p[1], *MEET)))
+
+
+def line_for(
+    boundary: splines.FrontBoundary, at: tuple[float, float], tip: tuple[float, float]
+) -> list[splines.FrontSection]:
+    """Return the line of a boundary whose far end is closest to a tip."""
+    return min(
+        boundary.lines, key=lambda line: float(splines.haversine_km(*outer_section(line, at)[0], tip[0], tip[1]))
+    )
+
+
+# --- junctions ---
+
+
+def test_find_junctions_returns_parent_position_and_branch() -> None:
+    main = np.array([[10, 5], [10, 6], [10, 7], [10, 8]])
+    branch = np.array([[10, 7], [11, 7], [12, 7]])
+    assert splines.find_junctions([main, branch]) == [(0, 2, 1)]
+    # A branch off a branch reports the branch it left, not the main path.
+    offshoot = np.array([[11, 7], [11, 8], [11, 9]])
+    assert splines.find_junctions([main, branch, offshoot]) == [(0, 2, 1), (1, 1, 2)]
+    # A pixel that two earlier paths both hold is read against the first of them.
+    assert splines.find_junctions([main, branch, np.array([[10, 7], [12, 9]])]) == [(0, 2, 1), (0, 2, 2)]
+
+
+def test_pin_end_hits_target_exactly_and_blends() -> None:
+    lon = np.arange(240.0, 250.01, 0.25)  # ~850 km of east-heading line at 40N, a point every 21 km
+    lat = np.full_like(lon, 40.0)
+    for at_start in (True, False):
+        end, far = (0, -1) if at_start else (-1, 0)
+        new_lon, new_lat = splines.pin_end(lon, lat, at_start, 244.0, 41.5, 75.0)
+        # The pinned end lands on the target exactly, so the lines that meet there share a vertex.
+        assert new_lon[end] == 244.0
+        assert new_lat[end] == 41.5
+        moved = splines.haversine_km(new_lon, new_lat, lon, lat)
+        order = slice(None) if at_start else slice(None, None, -1)
+        assert np.all(np.diff(moved[order]) <= 1e-9)  # the move fades out along the line
+        assert moved[1 if at_start else -2] < moved[end]  # its neighbour moves only part of the way
+        assert moved[far] == 0.0  # and past the taper, 75 km of the 850 km line, nothing moves
+    # A target a whole turn of 360 degrees away is the same place, read in the line's own longitude frame.
+    wrapped = splines.pin_end(lon, lat, True, 244.0 - 360.0, 41.5, 75.0)
+    np.testing.assert_allclose(wrapped[0], splines.pin_end(lon, lat, True, 244.0, 41.5, 75.0)[0])
+
+
+def test_y_junction_arms_share_one_vertex() -> None:
+    (boundary,) = splines.extract_fronts(y_probabilities(), CONFIG)
+    assert len(boundary.lines) == 3
+    # The crest's own junction sits about 100 km from where the three bands' centre lines cross, since
+    # thinning reads where the three bands are widest together, so look around the meeting point.
+    ends = [p for p in line_endpoints(boundary) if splines.haversine_km(p[0], p[1], *MEET) < 150.0]
+    assert len(ends) >= 3
+    for lon, lat in ends:
+        assert lon == pytest.approx(ends[0][0], abs=1e-9)
+        assert lat == pytest.approx(ends[0][1], abs=1e-9)
+
+
+def test_y_junction_keeps_the_sharp_corner() -> None:
+    crest = y_crest()
+    parent, k, _branch = splines.find_junctions(crest)[0]
+    crest_lon, crest_lat = splines.path_points(crest[parent], LAT, LON)
+    assert splines.turn_angle_deg(crest_lon, crest_lat, k, CONFIG.corner_window_km) >= CONFIG.corner_deg
+    pixels = np.vstack(crest)  # every pixel of the crest, the line every arm is drawn along
+    pixel_lon, pixel_lat = LON[pixels[:, 1]], LAT[pixels[:, 0]]
+
+    (boundary,) = splines.extract_fronts(y_probabilities(), CONFIG)
+    vertex = junction_vertex(boundary)
+    tips = [(244.5, 27.75), (280.25, 38.25), (239.75, 43.0)]  # the cold, warm and occluded arm tips
+    lines = [line_for(boundary, vertex, tip) for tip in tips]
+    # Each arm runs up to the junction and stops on a vertex there, staying within a pixel or two of the
+    # crest it was drawn along, instead of rounding the corner off.
+    for line in lines:
+        arm_lon, arm_lat = line_polyline(line)
+        near = splines.haversine_km(arm_lon, arm_lat, *vertex) < 100.0
+        assert near.sum() >= 2
+        for lon, lat in zip(arm_lon[near], arm_lat[near]):
+            assert float(splines.haversine_km(lon, lat, pixel_lon, pixel_lat).min()) < 25.0
+    # The cold and warm arms keep the crest's corner between them, read 100 km out along each arm.
+    legs = [point_km_along(*line_polyline(line), line_end_at(line, vertex), 100.0) for line in lines[:2]]
+    assert turn_at_deg(legs[0], vertex, legs[1]) >= CONFIG.corner_deg
+    # Fitting the whole crest as one spline, which is what the main path used to get, irons that corner
+    # out: it comes nowhere near where the arms meet, and turns far less than a corner as it passes by.
+    whole_lon, whole_lat = splines.smooth_line(crest_lon, crest_lat, CONFIG.smoothing_deg, CONFIG.spacing_km)
+    i = int(np.argmin(splines.haversine_km(whole_lon, whole_lat, *vertex)))
+    assert float(splines.haversine_km(whole_lon[i], whole_lat[i], *vertex)) > 25.0
+    dist = np.concatenate(
+        [[0.0], np.cumsum(splines.haversine_km(whole_lon[:-1], whole_lat[:-1], whole_lon[1:], whole_lat[1:]))]
+    )
+    back = int(np.argmin(np.abs(dist - dist[i] + 100.0)))
+    ahead = int(np.argmin(np.abs(dist - dist[i] - 100.0)))
+    assert (
+        turn_at_deg(
+            (float(whole_lon[back]), float(whole_lat[back])),
+            (float(whole_lon[i]), float(whole_lat[i])),
+            (float(whole_lon[ahead]), float(whole_lat[ahead])),
+        )
+        < CONFIG.corner_deg
+    )
+
+
+def test_y_junction_arms_keep_their_types() -> None:
+    (boundary,) = splines.extract_fronts(y_probabilities(), CONFIG)
+    vertex = junction_vertex(boundary)
+    tips = {"CF": (244.5, 27.75), "WF": (280.25, 38.25), "OF": (239.75, 43.0)}
+    for front_type, tip in tips.items():
+        point, section = outer_section(line_for(boundary, vertex, tip), vertex)
+        assert splines.haversine_km(point[0], point[1], tip[0], tip[1]) < 60.0
+        assert section.front_type == front_type
+
+
+def test_straight_line_with_a_branch_is_not_cut() -> None:
+    # A branch leaving a front at right angles: the front carries straight on through the junction, so
+    # there is no corner there, and only the branch's end moves onto the front it came off.
+    probs = probabilities(CF=ridge([(240.0, 40.0), (270.0, 40.0)]) + ridge([(255.0, 40.0), (255.0, 46.0)]))
+    (boundary,) = splines.extract_fronts(probs, CONFIG)
+    main, branch = sorted(boundary.lines, key=lambda line: -splines.line_length_km(*line_polyline(line)))
+    main_lon, main_lat = line_polyline(main)
+    assert splines.line_length_km(main_lon, main_lat) > 2000.0
+    branch_lon, branch_lat = line_polyline(branch)
+    assert splines.line_length_km(branch_lon, branch_lat) > 400.0
+    assert distance_to_polyline(float(branch_lon[0]), float(branch_lat[0]), main_lon, main_lat) < 1.0
+
+
+def test_short_attached_arm_survives() -> None:
+    # An occluded arm barely 230 km long is too short to stand on its own, but it is what makes the
+    # junction, so it is kept against the shorter length branches are held to.
+    probs = y_probabilities(of_arm=[MEET, (253.0, 41.4)])
+    (boundary,) = splines.extract_fronts(probs, CONFIG)
+    assert any(s.front_type == "OF" for line in boundary.lines for s in line)
+    assert len(boundary.lines) == 3
+    # Held to the length of a free-standing crest it goes, and with it the corner it made.
+    (strict,) = splines.extract_fronts(probs, splines.SplineConfig(min_branch_km=CONFIG.min_length_km))
+    assert not any(s.front_type == "OF" for line in strict.lines for s in line)
+    assert len(strict.lines) == 1
+
+
+def test_symbol_side_ignores_samples_near_other_arms() -> None:
+    lon = np.linspace(240.0, 270.0, 121)
+    section = splines.FrontSection("CF", lon, np.full_like(lon, 40.0), np.full_like(lon, 0.8))
+    # Warm air 150 km north of the middle of the line, which is exactly where its left-hand samples land.
+    # It belongs to another arm, not across this front, so the samples that read it have to go.
+    warm_blob = (LON[None, :] >= 249.0) & (LON[None, :] <= 261.0) & (LAT[:, None] > 40.5) & (LAT[:, None] <= 42.5)
+    temperature = grid_field(warm_south().values + 50.0 * warm_blob)
+    assert splines.symbol_side(section, CONFIG, temperature=temperature) == "left"
+    # The other arm of the crest, running along where those left-hand samples sit.
+    others = splines.PointIndex(np.linspace(249.0, 261.0, 49), np.full(49, 41.35))
+    side = splines.symbol_side(section, CONFIG, temperature=temperature, others=others)
+    assert side == "right"  # the warm air is south of the line, so the symbols point south
+
+
+def test_symbol_side_falls_back_when_everything_is_masked() -> None:
+    lon = np.linspace(240.0, 270.0, 121)
+    section = splines.FrontSection("CF", lon, np.full_like(lon, 40.0), np.full_like(lon, 0.8))
+    warm_blob = (LON[None, :] >= 249.0) & (LON[None, :] <= 261.0) & (LAT[:, None] > 40.5) & (LAT[:, None] <= 42.5)
+    temperature = grid_field(warm_south().values + 50.0 * warm_blob)
+    # An arm along the whole line leaves nothing to read, so the clue falls back to all its samples.
+    others = splines.PointIndex(np.linspace(240.0, 270.0, 121), np.full(121, 41.35))
+    plain = splines.symbol_side(section, CONFIG, temperature=temperature)
+    assert plain == "left"
+    assert splines.symbol_side(section, CONFIG, temperature=temperature, others=others) == plain
 
 
 # --- tracking ---

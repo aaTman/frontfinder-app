@@ -70,6 +70,7 @@ ERA5_NAME_TO_IFS_SHORTNAME = {
     "v_component_of_wind": "v",
     "specific_humidity": "q",
     "surface_pressure": "sp",
+    "mean_sea_level_pressure": "msl",
     "2m_temperature": "2t",
     "2m_dewpoint_temperature": "2d",
     "10m_u_component_of_wind": "10u",
