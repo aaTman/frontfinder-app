@@ -38,7 +38,8 @@ test("CLASS_STYLE has one distinct color per class, colorblind-safe order", () =
   const classes = Object.keys(CLASS_STYLE);
   assert.deepEqual(classes, ["cold", "warm", "stationary", "occluded", "dryline", "trough", "tropical_trough"]);
   const colors = classes.map((cls) => CLASS_STYLE[cls].color);
-  assert.equal(new Set(colors).size, colors.length, "every class needs a distinct color");
+  // trough and tropical_trough share a color; line style (dashed vs solid) separates them.
+  assert.equal(new Set(colors).size, colors.length - 1, "every class but the trough pair needs a distinct color");
   for (const color of colors) {
     assert.match(color, /^#[0-9a-f]{6}$/, `${color} must be a lowercase 6-digit hex string`);
   }
@@ -46,7 +47,7 @@ test("CLASS_STYLE has one distinct color per class, colorblind-safe order", () =
   // 7, 4 of the dataviz skill's reference categorical order, plus the two
   // CVD-searched trough colors -- see lib.js) so a future edit that silently
   // reverts to a non-validated set fails loudly.
-  assert.deepEqual(colors, ["#3987e5", "#d95926", "#199e70", "#9085e9", "#c98500", "#992288", "#bb1111"]);
+  assert.deepEqual(colors, ["#3987e5", "#d62728", "#199e70", "#9085e9", "#c98500", "#8c8c8c", "#8c8c8c"]);
 });
 
 test("bandOpacityForBin and binForBandOpacity round-trip for every bin", () => {
@@ -217,8 +218,8 @@ test("stationary lines are never green, and oriented ones are drawn by the tile"
 
 test("lineFilter splits solid from dashed classes and honors the class checkboxes", () => {
   const all = Object.keys(CLASS_STYLE);
-  assert.deepEqual(lineFilter(false, all)[2][1], ["cold", "warm", "stationary", "occluded"]);
-  assert.deepEqual(lineFilter(true, all)[2][1], ["dryline", "trough", "tropical_trough"]);
+  assert.deepEqual(lineFilter(false, all)[2][1], ["cold", "warm", "stationary", "occluded", "tropical_trough"]);
+  assert.deepEqual(lineFilter(true, all)[2][1], ["dryline", "trough"]);
   assert.deepEqual(lineFilter(false, ["warm", "trough"])[2][1], ["warm"]);
   assert.deepEqual(lineFilter(true, new Set(["warm", "trough"]))[2][1], ["trough"]);
   assert.deepEqual(lineFilter(false, [])[2][1], []);

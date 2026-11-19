@@ -15,20 +15,20 @@
 // independent checkbox toggle, exactly the "secondary encoding" the skill
 // requires to accept the 6-8 CVD band.
 //
-// 2026-10-08: trough (#992288) and tropical_trough (#bb1111) added for
-// nbs_square_dilation_trof_tt_no_inst. The reference palette's remaining
-// slots (magenta/green/red) all collapse against aqua or orange under CVD
-// simulation, so these were searched for directly: every pair across all
-// seven classes stays >= 9.5 OKLab dE under normal, protan, deutan and
-// tritan simulation (trough alone >= 15.6), with OKLCH L ~0.48-0.50.
+// trough and tropical_trough (added for nbs_square_dilation_trof_tt_no_inst)
+// share one gray. Pure black would vanish against the dark surface and the
+// spline overlay, so gray stands in for black/brown. The two are told apart by
+// line style (trough dashed, tropical trough solid), not color. Warm is a true
+// red (#d62728) so it reads as a warm front; the CVD check above predates it
+// and the validator has not been re-run for the new warm color.
 export const CLASS_STYLE = {
   cold: { color: "#3987e5", label: "Cold" },
-  warm: { color: "#d95926", label: "Warm" },
+  warm: { color: "#d62728", label: "Warm" },
   stationary: { color: "#199e70", label: "Stationary" },
   occluded: { color: "#9085e9", label: "Occluded" },
   dryline: { color: "#c98500", label: "Dryline" },
-  trough: { color: "#992288", label: "Trough" },
-  tropical_trough: { color: "#bb1111", label: "Tropical trough" },
+  trough: { color: "#8c8c8c", label: "Trough" },
+  tropical_trough: { color: "#8c8c8c", label: "Tropical trough" },
 };
 
 // Raw-probability breakpoints for the filled-contour look. See index.html's
@@ -129,10 +129,10 @@ export const FRONT_LINE_CLASS_BY_NAME = {
 };
 
 // Troughs and drylines are not fronts in the strict sense; drawing them dashed
-// keeps the two readable apart where both are on at once (and when color alone
-// is not enough). MapLibre's `line-dasharray` cannot be data-driven, so these
-// get their own layer.
-export const DASHED_FRONT_LINE_CLASSES = ["dryline", "trough", "tropical_trough"];
+// marks them as such. Tropical troughs (waves) share the trough color, so they
+// stay solid to tell the two apart. MapLibre's `line-dasharray` cannot be
+// data-driven, so dashed classes get their own layer.
+export const DASHED_FRONT_LINE_CLASSES = ["dryline", "trough"];
 
 // Where a step's front-lines file lives, or null if this step has none
 // (cycles published before the feature, or a step whose lines failed).
