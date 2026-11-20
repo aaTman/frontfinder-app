@@ -1,0 +1,10 @@
+[Unit]
+Description=Check GitHub for a new CI-green frontfinder-app main
+
+[Timer]
+OnCalendar=*:2/5
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

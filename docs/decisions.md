@@ -1,2 +1,3 @@
 # Decisions log
 Format: YYYY-MM-DD | decision | why | alternatives rejected
+2026-11-20 | Auto-deploy by pull: `frontfinder-auto-deploy.timer` (every 5 min) runs `deploy/auto-deploy.sh`, which fast-forwards the LXC 108 checkout to origin/main only if CI is green on that commit, the tree has no tracked edits, and no inference cycle is running | LXC is behind NAT/Cloudflare Tunnel so push-based (webhook/SSH) needs inbound access; pull needs none, and the static webapp is served straight from the checkout. Caddyfile/systemd changes and dependency changes are not auto-applied | GitHub Actions self-hosted-runner deploy job (runner holds deploy creds; more moving parts), webhook listener
