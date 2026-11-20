@@ -1,0 +1,11 @@
+[Unit]
+Description=frontfinder: fast-forward live checkout to CI-green origin/main
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/srv/frontfinder-app
+ExecStart=/srv/frontfinder-app/deploy/auto-deploy.sh
+TimeoutStartSec=5min
