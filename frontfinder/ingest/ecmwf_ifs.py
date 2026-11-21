@@ -1,8 +1,9 @@
-"""ECMWF IFS open-data source abstraction + model-input assembly.
+"""ECMWF IFS open-data field source.
 
-Design goal: the assembly logic (mapping a ModelManifest's variables/levels
-to fetch calls, deriving theta-e and PV where needed, stacking channels in
-manifest order) is pure and unit-testable against a fake data source. The
+Design goal: the assembly logic (`ingest/assembly.py`, mapping a
+ModelManifest's variables/levels to fetch calls, deriving theta-e and PV where
+needed, stacking channels in manifest order) is pure and unit-testable against
+a fake data source. The
 real network-backed source (`EcmwfOpenDataSource`) is a thin adapter around
 the `ecmwf-opendata` client and is not exercised by unit tests -- it needs
 an integration/smoke test run on the Proxmox VM where network access and
@@ -12,42 +13,18 @@ the real package are available.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Protocol
 
 import numpy as np
 
-from frontfinder.config.manifests import ModelManifest, VariableSpec
-from frontfinder.ingest.derive import equivalent_potential_temperature, potential_vorticity_isobaric, potential_temperature
+from frontfinder.ingest.assembly import (  # noqa: F401 -- re-exported for existing importers
+    DERIVED_VARIABLES,
+    DIRECT_PRESSURE_LEVEL_VARIABLES,
+    DIRECT_SINGLE_LEVEL_VARIABLES,
+    STATIC_SINGLE_LEVEL_VARIABLES,
+    assemble_model_input,
+)
+from frontfinder.ingest.base import FieldSource, ForecastCycle, GridSpec
 
-# Native IFS open-data base variables directly available at pressure levels
-# or single-level, keyed by the ERA5-style name used in the model configs.
-DIRECT_PRESSURE_LEVEL_VARIABLES = {
-    "geopotential",
-    "temperature",
-    "u_component_of_wind",
-    "v_component_of_wind",
-    "specific_humidity",
-}
-DIRECT_SINGLE_LEVEL_VARIABLES = {
-    "surface_pressure",
-    "2m_temperature",
-    "2m_dewpoint_temperature",
-    "10m_u_component_of_wind",
-    "10m_v_component_of_wind",
-}
-# Variables the model configs ask for that IFS open-data doesn't publish
-# directly -- computed in `derive.py` from the direct variables above.
-DERIVED_VARIABLES = {"equivalent_potential_temperature", "potential_vorticity"}
-
-# Single-level variables that are physically invariant (never change cycle to
-# cycle) and therefore have no real-time IFS open-data field at all -- IFS's
-# "oper" fc stream only publishes actual forecast fields (confirmed against
-# ECMWF's published oper single-level param table: no surface
-# geopotential/orography among them). Sourced once from a static local file
-# instead of a per-cycle fetch -- see `EcmwfOpenDataSource.fetch_static` and
-# `STATIC_FIELD_FILENAMES` below.
-STATIC_SINGLE_LEVEL_VARIABLES = {"geopotential_at_surface"}
 
 # variable -> filename under `EcmwfOpenDataSource`'s `static_data_dir`.
 # geopotential_at_surface_era5_0p25deg.npy: float32 (721, 1440), lat 90..-90,
@@ -79,18 +56,14 @@ ERA5_NAME_TO_IFS_SHORTNAME = {
 
 
 @dataclass(frozen=True)
-class IFSCycle:
-    """One IFS operational forecast cycle, e.g. 2026-08-19 12Z."""
-
-    date: str  # "YYYY-MM-DD"
-    run_hour: int  # one of 0, 6, 12, 18
-    step: int = 0  # forecast lead time in hours; 0 == analysis/T+0
+class IFSCycle(ForecastCycle):
+    """One IFS operational forecast cycle, e.g. 2026-08-19 12Z. `run_hour`
+    is one of 0, 6, 12, 18."""
 
     def __post_init__(self) -> None:
         if self.run_hour not in (0, 6, 12, 18):
             raise ValueError(f"run_hour must be one of 0/6/12/18, got {self.run_hour}")
-        # raises ValueError if malformed
-        datetime.strptime(self.date, "%Y-%m-%d")
+        super().__post_init__()
 
 
 # Desired lead-time grid for the "every 6 hours out to 240 hours" forecast
@@ -139,42 +112,25 @@ def target_steps_for_cycle(
     return tuple(s for s in desired if s in published)
 
 
-class IFSFieldSource(Protocol):
-    """Anything that can hand back IFS fields on the global 0.25deg grid."""
-
-    @property
-    def lat(self) -> np.ndarray: ...
-
-    @property
-    def lon(self) -> np.ndarray: ...
-
-    def fetch_pressure_level(self, variable: str, level_hpa: int, cycle: IFSCycle) -> np.ndarray: ...
-
-    def fetch_single_level(self, variable: str, cycle: IFSCycle) -> np.ndarray: ...
-
-    def fetch_static(self, variable: str) -> np.ndarray:
-        """A physically-invariant single-level field with no real-time IFS
-        feed (see `STATIC_SINGLE_LEVEL_VARIABLES`) -- no `cycle` argument
-        since it's the same field for every cycle."""
-        ...
+# Existing name for the model-agnostic contract in `ingest/base.py`.
+IFSFieldSource = FieldSource
 
 
-class FakeIFSFieldSource:
+class FakeIFSFieldSource(FieldSource):
     """Deterministic synthetic field source for tests -- no network."""
+
+    source_id = "fake"
 
     def __init__(self, lat: np.ndarray, lon: np.ndarray, seed: int = 0):
         self._lat = lat
         self._lon = lon
+        self._grid_spec = GridSpec.regular_latlon("fake", lat, lon)
         self._rng = np.random.default_rng(seed)
         self._cache: dict[tuple, np.ndarray] = {}
 
     @property
-    def lat(self) -> np.ndarray:
-        return self._lat
-
-    @property
-    def lon(self) -> np.ndarray:
-        return self._lon
+    def grid(self) -> GridSpec:
+        return self._grid_spec
 
     def _grid(self, base: float, spread: float) -> np.ndarray:
         return base + spread * self._rng.standard_normal((len(self._lat), len(self._lon)))
@@ -213,7 +169,7 @@ class FakeIFSFieldSource:
         return self._cache[key]
 
 
-class EcmwfOpenDataSource:
+class EcmwfOpenDataSource(FieldSource):
     """Real network-backed IFSFieldSource, using the `ecmwf-opendata` client
     to pull the global 0.25deg operational IFS grid.
 
@@ -246,6 +202,8 @@ class EcmwfOpenDataSource:
     fields, 4x/day) -- the reason to prefer AWS isn't our load, it's not
     contending with everyone else's.
     """
+
+    source_id = "ifs"
 
     def __init__(
         self,
@@ -310,6 +268,7 @@ class EcmwfOpenDataSource:
         self._client = None  # lazy: constructed on first fetch, see _get_client
         self._lat = np.linspace(90.0, -90.0, 721)  # IFS open-data 0.25deg grid, N->S
         self._lon = np.linspace(0.0, 359.75, 1440)
+        self._grid_spec = GridSpec.regular_latlon("ifs-0p25", self._lat, self._lon)
         self._field_cache: dict[tuple, np.ndarray] = {}
 
     def _get_client(self):
@@ -361,12 +320,8 @@ class EcmwfOpenDataSource:
         )
 
     @property
-    def lat(self) -> np.ndarray:
-        return self._lat
-
-    @property
-    def lon(self) -> np.ndarray:
-        return self._lon
+    def grid(self) -> GridSpec:
+        return self._grid_spec
 
     def _fetch_grib(self, param: str, cycle: IFSCycle, levelist: list[int] | None) -> "xr.Dataset":
         import os
@@ -529,122 +484,3 @@ class EcmwfOpenDataSource:
                 )
             self._static_field_cache[variable] = arr.astype(np.float32)
         return self._static_field_cache[variable]
-
-
-def _resolve_direct_variable_at_level(
-    var_name: str, level_hpa: int, source: IFSFieldSource, cycle: IFSCycle
-) -> np.ndarray:
-    return source.fetch_pressure_level(var_name, level_hpa, cycle)
-
-
-def _resolve_direct_single_level_variable(
-    var_name: str, source: IFSFieldSource, cycle: IFSCycle
-) -> np.ndarray:
-    return source.fetch_single_level(var_name, cycle)
-
-
-def _resolve_derived_variable_at_level(
-    var_name: str, level_hpa: int, source: IFSFieldSource, cycle: IFSCycle
-) -> np.ndarray:
-    # potential_vorticity is NOT handled here -- it needs every level's
-    # theta/u/v at once for its vertical derivative, so it's resolved
-    # separately via _resolve_potential_vorticity_all_levels and never
-    # routed through this per-level function (see assemble_model_input).
-    if var_name == "equivalent_potential_temperature":
-        t = source.fetch_pressure_level("temperature", level_hpa, cycle)
-        q = source.fetch_pressure_level("specific_humidity", level_hpa, cycle)
-        return equivalent_potential_temperature(t, q, pressure_hpa=level_hpa)
-
-    raise ValueError(f"no per-level derivation defined for {var_name!r}")
-
-
-def _resolve_potential_vorticity_all_levels(
-    levels: tuple[int, ...], source: IFSFieldSource, cycle: IFSCycle
-) -> dict[int, np.ndarray]:
-    """potential_vorticity needs every level's theta/u/v at once for its
-    vertical derivative -- resolved together and cached by level rather than
-    one level at a time like the other variables, then indexed into as the
-    level-major assembly loop reaches each level."""
-    theta_by_level = {
-        lvl: potential_temperature(source.fetch_pressure_level("temperature", lvl, cycle), lvl) for lvl in levels
-    }
-    u_by_level = {lvl: source.fetch_pressure_level("u_component_of_wind", lvl, cycle) for lvl in levels}
-    v_by_level = {lvl: source.fetch_pressure_level("v_component_of_wind", lvl, cycle) for lvl in levels}
-    return {
-        lvl: potential_vorticity_isobaric(u_by_level, v_by_level, theta_by_level, source.lat, source.lon, level_hpa=lvl)
-        for lvl in levels
-    }
-
-
-def assemble_model_input(
-    manifest: ModelManifest, source: IFSFieldSource, cycle: IFSCycle
-) -> np.ndarray:
-    """Fetch + derive + stack every channel `manifest` needs, in the model's
-    actual trained channel order.
-
-    2026-08-20 postmortem: this function used to stack channels
-    VARIABLE-major (every level of variable[0], then every level of
-    variable[1], ...) -- matching how ModelManifest.variables happens to be
-    grouped, but NOT how fronts/src/fronts/data/inputs.py's
-    inputs_ds_to_dataarray() actually built the training input tensor. That
-    function stacks pressure-level channels LEVEL-major (every variable at
-    level[0], then every variable at level[1], ...) via
-    `ds[level_vars].to_array(...).stack(channel=("level","variable"))`
-    (level listed before variable in the stack call, so level varies
-    slowest). The mismatch meant the model's baked-in per-channel
-    normalization (`input_normalization` Rescaling layer -- see
-    scripts/diagnose_model_saturation.py) was applied to the wrong channels:
-    e.g. a specific-humidity channel's [~0, ~0.02]-range min/max stats
-    getting applied to a 250-390K temperature-like channel, driving the
-    rescaled value to thousands of standard-deviations off. That saturated
-    every downstream layer into predicting background with ~1.0 confidence
-    regardless of the real input -- confirmed live: `diagnose_best_loss_output.py`
-    showed background at a bit-identical 0.99999994 across every sampled
-    pixel, and `diagnose_model_saturation.py`'s per-channel comparison showed
-    rescaled ranges like 8755..13310 or -2091..3206 instead of the expected
-    ~0..1 for a minmax Rescaling layer. Fixed by stacking in the same
-    level-major order `ModelManifest.channel_names()` now documents.
-
-    Returns an array of shape (len(source.lat), len(source.lon), manifest.n_channels),
-    with channels ordered exactly as `manifest.channel_names()` describes.
-    """
-    known_direct = DIRECT_PRESSURE_LEVEL_VARIABLES | DIRECT_SINGLE_LEVEL_VARIABLES | STATIC_SINGLE_LEVEL_VARIABLES
-    for var in manifest.variables:
-        if var.name not in known_direct and var.name not in DERIVED_VARIABLES:
-            raise ValueError(
-                f"variable {var.name!r} is neither a known direct IFS field nor a "
-                "known derived field -- add a mapping in ecmwf_ifs.py before running"
-            )
-
-    pressure_vars = manifest.pressure_level_variables()
-    channels: list[np.ndarray] = []
-
-    if pressure_vars:
-        levels = manifest.shared_levels
-        # potential_vorticity's cross-level dependency means it has to be
-        # resolved for all its levels up front rather than one level at a
-        # time inside the level-major loop below.
-        pv_by_level: dict[int, np.ndarray] | None = None
-        if any(v.name == "potential_vorticity" for v in pressure_vars):
-            pv_by_level = _resolve_potential_vorticity_all_levels(levels, source, cycle)
-
-        for level in levels:
-            for var in pressure_vars:
-                if var.name == "potential_vorticity":
-                    channels.append(pv_by_level[level])
-                elif var.name == "equivalent_potential_temperature":
-                    channels.append(_resolve_derived_variable_at_level(var.name, level, source, cycle))
-                else:
-                    channels.append(_resolve_direct_variable_at_level(var.name, level, source, cycle))
-
-    for var in manifest.single_level_variables():
-        if var.name in STATIC_SINGLE_LEVEL_VARIABLES:
-            channels.append(source.fetch_static(var.name))
-        else:
-            channels.append(_resolve_direct_single_level_variable(var.name, source, cycle))
-
-    stacked = np.stack(channels, axis=-1)
-    expected_shape = (len(source.lat), len(source.lon), manifest.n_channels)
-    if stacked.shape != expected_shape:
-        raise AssertionError(f"assembled input shape {stacked.shape} != expected {expected_shape}")
-    return stacked
