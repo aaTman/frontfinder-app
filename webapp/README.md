@@ -115,6 +115,29 @@ OpenFreeMap glyph server does not have 404s and the text never draws.
 `pressureStatus`, `PRESSURE_COLORS`/`PRESSURE_FONT*`), covered by
 `lib.test.js`.
 
+## HRRR (experimental, `?hrrr=1`)
+
+HRRR only appears with `?hrrr=1`, so the default page is unchanged. There is no
+scheduled HRRR pipeline yet: `scripts/publish_hrrr_pilot.py` publishes one
+finished pilot run to a local data directory.
+
+```bash
+uv run --frozen python scripts/publish_hrrr_pilot.py --root ./hrrr-pilot --out ./hrrr-pilot/viewer-data
+DATA_DIR=./hrrr-pilot/viewer-data node scripts/dev_server.mjs 8080
+# open http://127.0.0.1:8080/?hrrr=1
+```
+
+The store stays on HRRR's native Lambert grid. Its `latest.json` adds a `grid`
+block (`proj4`, edge `bounds`, `lat_ascending`, `dimensions`) that
+`layerGridOptions` passes to `ZarrLayer`, which reprojects client-side. A
+pointer without `grid` is a global lat/lon model. `source_label` names the
+cycle label, and `domain` points to a GeoJSON band drawn over the area within
+32 cells (about 770 km) of the boundary, where the model loses context.
+
+Models are matched by forecast hour, not valid time. The pilot HRRR run is one
+fixed cycle, so with v2.0.1 also on, the two layers usually show different
+times. The status line lists each model's cycle.
+
 ## Colors, bin math, and tests (`lib.js`)
 
 2026-08-21: `CLASS_STYLE` (the per-class hex colors), the `FRONT_*` bin
