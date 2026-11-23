@@ -37,15 +37,20 @@ from frontfinder.ingest.hrrr_grid import (
 
 HRRR_BASE_URL = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
 HRRR_STATIC_CYCLE = ForecastCycle("2026-11-20", 12, 0)
-HRRR_SYNOPTIC_HOURS = (0, 6, 12, 18)
+# NOAA publishes HRRR CONUS lead hours hourly, but not equally far out: the 00Z and
+# 12Z runs run to 48 h, every other run hour stops at 18 h. A lead hour outside that
+# range is a 404 on the .idx, not an empty field, so the target list has to follow
+# NOAA's own schedule.
+HRRR_LONG_RANGE_HOURS = (0, 12)
 
 
 def hrrr_target_steps_for_cycle(run_hour: int) -> tuple[int, ...]:
-    """6-hourly forecast lead hours targeted for a HRRR cycle (48h synoptic, 18h otherwise)."""
+    """Every published forecast lead hour for one HRRR cycle, hourly to 48 h (00/12Z)
+    or 18 h (all other run hours)."""
     if not 0 <= run_hour < 24:
         raise ValueError(f"run_hour must be in 0..23, got {run_hour}")
-    max_step = 48 if run_hour in HRRR_SYNOPTIC_HOURS else 18
-    return tuple(range(0, max_step + 1, 6))
+    max_step = 48 if run_hour in HRRR_LONG_RANGE_HOURS else 18
+    return tuple(range(0, max_step + 1))
 
 STANDARD_GRAVITY = 9.80665
 
