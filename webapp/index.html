@@ -97,7 +97,7 @@
     // Keep these two literals in sync with MODELS.latestPointer below --
     // they can't be derived from it because this script runs before the
     // module graph is loaded.
-    const LATEST_MODEL = "v2.0.1";
+    const LATEST_MODEL = new URLSearchParams(location.search).get("hrrr") === "1" ? "hrrr-3km" : "v2.0.1";
     const LATEST_POINTER = `/data/${LATEST_MODEL}/latest.json`;
     const warm = fetch(LATEST_POINTER, { cache: "no-store" }).then((res) => {
       if (!res.ok) throw new Error(`no published run for ${LATEST_MODEL} (HTTP ${res.status})`);
@@ -871,10 +871,12 @@
     };
     // HRRR is experimental and has no scheduled pipeline yet, so it only
     // exists behind ?hrrr=1 and the default page is unchanged.
-    const HRRR_MODEL = "hrrr-24km";
+    const HRRR_MODEL = "hrrr-3km";
+    const HRRR_24KM_MODEL = "hrrr-24km";
     const HRRR_ENABLED = new URLSearchParams(window.location.search).get("hrrr") === "1";
     if (HRRR_ENABLED) {
-      MODELS[HRRR_MODEL] = { label: "HRRR 24 km (experimental)", latestPointer: `${ZARR_ROOT}/${HRRR_MODEL}/latest.json` };
+      MODELS[HRRR_MODEL] = { label: "HRRR 3 km C1 (experimental)", latestPointer: `${ZARR_ROOT}/${HRRR_MODEL}/latest.json` };
+      MODELS[HRRR_24KM_MODEL] = { label: "HRRR 24 km B0 (experimental)", latestPointer: `${ZARR_ROOT}/${HRRR_24KM_MODEL}/latest.json` };
     }
     // Which models are shown by default. spix_wce_loss_modified_dilation was
     // removed 2026-10-01 (no GPU use); with one model left the model-toggles

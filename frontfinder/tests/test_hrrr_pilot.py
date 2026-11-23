@@ -434,3 +434,31 @@ for name in ("tensorflow", "keras", "matplotlib", "cartopy"):
     result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
     assert sorted(p.name for p in tmp_path.iterdir()) == ["runs"]
+
+
+def test_c1_refiner_config_runs_in_dry_run_and_reuses_cached_24km(tmp_path: Path) -> None:
+    standalone_root = tmp_path / "standalone"
+    assert (
+        runner.main(["--root", str(standalone_root), "--dry-run", "--cases", CASE, "--configs", "hrrr_3km_c1"]) == 0
+    )
+    meta = json.loads((_run_dir(standalone_root, "hrrr_3km_c1") / "meta.json").read_text())
+    assert meta["status"] == "ok" and meta["grid"] == native_grid(1).to_metadata()
+    with np.load(_run_dir(standalone_root, "hrrr_3km_c1") / "probs.npz") as stored:
+        assert set(stored.files) == set(MANIFEST.served_classes)
+        for cls in stored.files:
+            assert stored[cls].shape == native_grid(1).shape
+            assert stored[cls].dtype == np.float32
+
+    cached_root = tmp_path / "cached"
+    assert (
+        runner.main(["--root", str(cached_root), "--dry-run", "--cases", CASE, "--configs", "hrrr_24km_earth"]) == 0
+    )
+    backend, calls = _counting_backend()
+    assert runner.run_config(str(cached_root), CYCLE, runner.CONFIGS["hrrr_3km_c1"], backend, MANIFEST) == "ok"
+    assert calls == ["hrrr_3km_c1"]
+    with (
+        np.load(_run_dir(standalone_root, "hrrr_3km_c1") / "probs.npz") as standalone_probs,
+        np.load(_run_dir(cached_root, "hrrr_3km_c1") / "probs.npz") as cached_probs,
+    ):
+        for cls in MANIFEST.served_classes:
+            np.testing.assert_allclose(cached_probs[cls], standalone_probs[cls], atol=1e-6)

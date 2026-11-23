@@ -35,10 +35,16 @@ def fake_probabilities(shape: tuple[int, int]) -> dict[str, np.ndarray]:
     return {cls: (ramp / (i + 1)).astype(np.float32) for i, cls in enumerate(MANIFEST.served_classes)}
 
 
-def write_run(root: Path, grid_name: str = "hrrr-conus-24km", status: str = "ok") -> Path:
-    run_dir = root / "runs" / CASE / CONFIG
+def write_run(
+    root: Path,
+    grid_name: str = "hrrr-conus-24km",
+    status: str = "ok",
+    config: str = CONFIG,
+    coarsen: int = 8,
+) -> Path:
+    run_dir = root / "runs" / CASE / config
     run_dir.mkdir(parents=True)
-    np.savez(run_dir / "probs.npz", **fake_probabilities(native_grid(8).shape))
+    np.savez(run_dir / "probs.npz", **fake_probabilities(native_grid(coarsen).shape))
     meta = {
         "status": status,
         "grid": {"name": grid_name},
@@ -80,6 +86,11 @@ class TestPublish:
     def test_config_grid_parses_native_configs_only(self, publisher):
         assert publisher.config_grid("hrrr_24km_grid").shape == native_grid(8).shape
         assert publisher.config_grid("hrrr_3km_earth").shape == native_grid(1).shape
+        assert publisher.config_grid("hrrr_3km_c1").shape == native_grid(1).shape
+        assert publisher.config_model_key("hrrr_24km_earth") == "hrrr-24km"
+        assert publisher.config_model_key("hrrr_3km_c1") == "hrrr-3km"
+        assert publisher.DEFAULT_CONFIG == "hrrr_3km_c1"
+        assert publisher.MODEL_KEY == "hrrr-3km"
         for bad in ("hrrr_latlon_0p25_earth", "ifs_0p25", "hrrr_5km_earth"):
             with pytest.raises(ValueError, match="native-grid"):
                 publisher.config_grid(bad)
@@ -93,12 +104,14 @@ class TestPublish:
         assert y_max == pytest.approx(grid.y.max() + 12_000)
 
     def test_domain_is_a_closed_band_around_the_interior(self, publisher):
-        grid = native_grid(8)
-        geometry = publisher.domain_geojson(grid)["features"][0]["geometry"]
-        outer, hole = (np.array(ring) for ring in geometry["coordinates"])
-        assert (outer[0] == outer[-1]).all() and (hole[0] == hole[-1]).all()
-        assert outer[:, 0].min() < hole[:, 0].min() and hole[:, 0].max() < outer[:, 0].max()
-        assert outer[:, 1].min() < hole[:, 1].min() and hole[:, 1].max() < outer[:, 1].max()
+        for coarsen, expected_margin in ((8, 32), (1, 256)):
+            grid = native_grid(coarsen)
+            feature = publisher.domain_geojson(grid)["features"][0]
+            assert feature["properties"]["margin_cells"] == expected_margin
+            outer, hole = (np.array(ring) for ring in feature["geometry"]["coordinates"])
+            assert (outer[0] == outer[-1]).all() and (hole[0] == hole[-1]).all()
+            assert outer[:, 0].min() < hole[:, 0].min() and hole[:, 0].max() < outer[:, 0].max()
+            assert outer[:, 1].min() < hole[:, 1].min() and hole[:, 1].max() < outer[:, 1].max()
 
     def test_domain_refuses_a_margin_with_no_interior(self, publisher):
         with pytest.raises(ValueError, match="no interior"):
@@ -109,7 +122,7 @@ class TestPublish:
         write_run(root)
         store = Path(publisher.publish(str(root), str(out), CASE, CONFIG))
         assert store.name == f"{CASE}.zarr" and (store / "zarr.json").exists()
-        model_dir = out / publisher.MODEL_KEY
+        model_dir = out / publisher.config_model_key(CONFIG)
         assert not list(model_dir.glob("*.tmp"))
         latest = json.loads((model_dir / "latest.json").read_text())
         assert latest["cycle_time"] == "2026-11-20T12:00:00"
@@ -118,6 +131,15 @@ class TestPublish:
         assert latest["grid"]["proj4"] == HRRR_CRS
         assert latest["grid"]["dimensions"] == {"lat": "y", "lon": "x"}
         assert (model_dir / latest["domain"]).exists()
+
+    def test_cli_publishes_default_case_and_config(self, publisher, tmp_path):
+        root, out = tmp_path / "root", tmp_path / "out"
+        write_run(root, grid_name="hrrr-conus-3km", config=publisher.DEFAULT_CONFIG, coarsen=1)
+        assert publisher.main(["--root", str(root), "--out", str(out)]) == 0
+        model_dir = out / publisher.MODEL_KEY
+        assert (model_dir / f"{publisher.DEFAULT_CASE}.zarr" / "zarr.json").exists()
+        domain = json.loads((model_dir / "domain.geojson").read_text())
+        assert domain["features"][0]["properties"]["margin_cells"] == 256
 
     def test_publish_never_overwrites_a_store(self, publisher, tmp_path):
         root, out = tmp_path / "root", tmp_path / "out"

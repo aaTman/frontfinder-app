@@ -235,3 +235,37 @@ def test_prune_old_output_stores_also_prunes_probabilities_sidecars(tmp_path):
     assert deleted == [os.path.join(model_dir, "2026-08-01T00Z_f006.probs.npz")]
     for name, pruned in names.items():
         assert os.path.exists(os.path.join(model_dir, name)) == (not pruned)
+
+
+def test_prune_old_output_stores_preserves_domain_geojson(tmp_path):
+    root = str(tmp_path)
+    model_dir = os.path.join(root, "hrrr-3km")
+    os.makedirs(model_dir)
+    domain_file = os.path.join(model_dir, "domain.geojson")
+    with open(domain_file, "w") as f:
+        f.write("{}")
+    old_store = _touch_store(root, "hrrr-3km", "2026-08-01T12Z_f000.zarr")
+
+    deleted = prune_old_output_stores(root, max_age_days=10, now=NOW)
+
+    assert deleted == [old_store]
+    assert os.path.exists(domain_file)
+
+
+def test_prune_old_cache_files_prunes_hrrr_date_directories(tmp_path):
+    cache_dir = str(tmp_path)
+    hrrr_root = os.path.join(cache_dir, "hrrr")
+    old_dir = os.path.join(hrrr_root, "20260801")
+    new_dir = os.path.join(hrrr_root, "20260820")
+    keep_dir = os.path.join(hrrr_root, "misc")
+    for d in (old_dir, new_dir, keep_dir):
+        os.makedirs(d)
+        with open(os.path.join(d, "t12z_sfc_f00_TMP_surface.grib2"), "w") as f:
+            f.write("grib")
+
+    deleted = prune_old_cache_files(cache_dir, max_age_days=10, now=NOW)
+
+    assert deleted == [old_dir]
+    assert not os.path.exists(old_dir)
+    assert os.path.exists(new_dir)
+    assert os.path.exists(keep_dir)

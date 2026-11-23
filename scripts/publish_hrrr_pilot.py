@@ -18,68 +18,33 @@ import numpy as np
 
 from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST
 from frontfinder.ingest.base import GridSpec
-from frontfinder.ingest.hrrr_grid import native_grid
+from frontfinder.ingest.hrrr_grid import (
+    LOW_CONFIDENCE_MARGIN_CELLS,
+    RING_STRIDE,
+    domain_geojson,
+    edge_bounds,
+    native_grid,
+)
 from frontfinder.zarrio.pyramid import RegionalFrontFields, build_regional_pyramid, write_front_pyramid
 
 DEFAULT_CASE = "2026-11-20T12Z_f000"
-DEFAULT_CONFIG = "hrrr_24km_earth"
-MODEL_KEY = "hrrr-24km"
+DEFAULT_CONFIG = "hrrr_3km_c1"
+MODEL_KEY = "hrrr-3km"
 COARSEN_BY_KM = {3: 1, 6: 2, 12: 4, 24: 8}
-# About 770 km at 24 km, the margin the results audit found still loses context.
-LOW_CONFIDENCE_MARGIN_CELLS = 32
-RING_STRIDE = 4
 
 
 def config_grid(config: str) -> GridSpec:
-    """The native grid of an `hrrr_<km>km_<winds>` config."""
+    """The native grid of an `hrrr_<km>km_<tag>` config (e.g. `hrrr_3km_c1`, `hrrr_24km_earth`)."""
     parts = config.split("_")
     if len(parts) != 3 or parts[0] != "hrrr" or not parts[1].endswith("km") or parts[1][:-2] not in map(str, COARSEN_BY_KM):
         raise ValueError(f"{config!r} is not a native-grid HRRR config")
     return native_grid(COARSEN_BY_KM[int(parts[1][:-2])])
 
 
-def edge_bounds(grid: GridSpec) -> list[float]:
-    """[xMin, yMin, xMax, yMax] of the cell edges, in CRS units."""
-    dx = abs(float(grid.x[1] - grid.x[0]))
-    dy = abs(float(grid.y[1] - grid.y[0]))
-    return [
-        float(grid.x.min()) - dx / 2,
-        float(grid.y.min()) - dy / 2,
-        float(grid.x.max()) + dx / 2,
-        float(grid.y.max()) + dy / 2,
-    ]
-
-
-def _ring(grid: GridSpec, margin: int) -> list[list[float]]:
-    """Closed lon/lat ring around the cells `margin` in from each edge."""
-    rows, cols = grid.shape
-    top, bottom, left, right = margin, rows - 1 - margin, margin, cols - 1 - margin
-    cells = (
-        [(top, c) for c in range(left, right, RING_STRIDE)]
-        + [(r, right) for r in range(top, bottom, RING_STRIDE)]
-        + [(bottom, c) for c in range(right, left, -RING_STRIDE)]
-        + [(r, left) for r in range(bottom, top, -RING_STRIDE)]
-    )
-    ring = [
-        [round((float(grid.lon[r, c]) + 180.0) % 360.0 - 180.0, 4), round(float(grid.lat[r, c]), 4)] for r, c in cells
-    ]
-    return [*ring, ring[0]]
-
-
-def domain_geojson(grid: GridSpec, margin: int = LOW_CONFIDENCE_MARGIN_CELLS) -> dict[str, Any]:
-    """The lower-confidence edge band: the domain with its interior cut out."""
-    if 2 * margin >= min(grid.shape):
-        raise ValueError(f"margin {margin} leaves no interior on a {grid.shape} grid")
-    return {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "properties": {"kind": "low_confidence_edge", "margin_cells": margin},
-                "geometry": {"type": "Polygon", "coordinates": [_ring(grid, 0), _ring(grid, margin)[::-1]]},
-            }
-        ],
-    }
+def config_model_key(config: str) -> str:
+    """The viewer model directory key for a native-grid HRRR config (e.g. `hrrr-3km`)."""
+    config_grid(config)
+    return f"hrrr-{config.split('_')[1]}"
 
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
@@ -89,7 +54,13 @@ def _write_json(path: str, payload: dict[str, Any]) -> None:
     os.replace(temp, path)
 
 
-def publish(root: str, out: str, case: str = DEFAULT_CASE, config: str = DEFAULT_CONFIG) -> str:
+def publish(
+    root: str,
+    out: str,
+    case: str = DEFAULT_CASE,
+    config: str = DEFAULT_CONFIG,
+    model_key: str | None = None,
+) -> str:
     """Write the store and pointer for one run; returns the store path."""
     run_dir = os.path.join(root, "runs", case, config)
     with open(os.path.join(run_dir, "meta.json")) as handle:
@@ -107,7 +78,7 @@ def publish(root: str, out: str, case: str = DEFAULT_CASE, config: str = DEFAULT
     with np.load(os.path.join(run_dir, "probs.npz")) as saved:
         probabilities = {cls: saved[cls] for cls in manifest.served_classes}
 
-    model_dir = os.path.join(out, MODEL_KEY)
+    model_dir = os.path.join(out, model_key or config_model_key(config))
     os.makedirs(model_dir, exist_ok=True)
     store_name = f"{case}.zarr"
     store_path = os.path.join(model_dir, store_name)

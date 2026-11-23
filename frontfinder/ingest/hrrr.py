@@ -37,6 +37,15 @@ from frontfinder.ingest.hrrr_grid import (
 
 HRRR_BASE_URL = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
 HRRR_STATIC_CYCLE = ForecastCycle("2026-11-20", 12, 0)
+HRRR_SYNOPTIC_HOURS = (0, 6, 12, 18)
+
+
+def hrrr_target_steps_for_cycle(run_hour: int) -> tuple[int, ...]:
+    """6-hourly forecast lead hours targeted for a HRRR cycle (48h synoptic, 18h otherwise)."""
+    if not 0 <= run_hour < 24:
+        raise ValueError(f"run_hour must be in 0..23, got {run_hour}")
+    max_step = 48 if run_hour in HRRR_SYNOPTIC_HOURS else 18
+    return tuple(range(0, max_step + 1, 6))
 
 STANDARD_GRAVITY = 9.80665
 
@@ -376,6 +385,19 @@ class HRRRFieldSource(FieldSource):
     @property
     def grid(self) -> GridSpec:
         return self._grid_spec
+
+    def is_cycle_available(self, cycle: ForecastCycle) -> bool:
+        """HEAD-check that both prs and sfc `.idx` files for `cycle` exist on NOAA S3."""
+        for product in ("prs", "sfc"):
+            url = f"{self._grib_url(product, cycle)}.idx"
+            request = urllib.request.Request(url, method="HEAD")
+            try:
+                with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_S) as response:
+                    if response.status != 200:
+                        return False
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError, http.client.HTTPException):
+                return False
+        return True
 
     def fetch_pressure_level(self, variable: str, level_hpa: int, cycle: ForecastCycle) -> np.ndarray:
         if variable not in _PRESSURE_FIELDS:

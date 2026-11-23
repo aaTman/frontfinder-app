@@ -56,6 +56,7 @@ class PilotConfig:
     coarsen: int = 1
     wind_frame: Literal["earth", "grid"] = "earth"
     target: Literal["native", "latlon_0p25"] = "native"
+    refiner: bool = False
 
 
 def _build_configs() -> dict[str, PilotConfig]:
@@ -64,6 +65,7 @@ def _build_configs() -> dict[str, PilotConfig]:
         for km, coarsen in ((3, 1), (6, 2), (12, 4), (24, 8))
         for frame in ("earth", "grid")
     ]
+    configs.append(PilotConfig("hrrr_3km_c1", "hrrr", coarsen=1, wind_frame="earth", refiner=True))
     configs.append(PilotConfig("hrrr_latlon_0p25_earth", "hrrr", coarsen=8, target="latlon_0p25"))
     configs.append(PilotConfig("ifs_0p25", "ifs"))
     # IFS on the same grids and regional path as HRRR, so a comparison against
@@ -86,6 +88,8 @@ class Backend:
     load_norm_ranges: Callable[[], tuple[np.ndarray, np.ndarray]]
     regional: Callable[..., np.ndarray]
     tiled: Callable[..., np.ndarray]
+    load_refiner: Callable[[], tuple[Any, np.ndarray, np.ndarray]] | None = None
+    refine: Callable[..., np.ndarray] | None = None
 
 
 def case_id(cycle: ForecastCycle) -> str:
@@ -275,11 +279,44 @@ def _validate_output(output: np.ndarray, shape: tuple[int, int], manifest: Model
         raise ValueError(f"inference output outside [0, 1]: {output.min()}..{output.max()}")
 
 
+def _load_cached_b0(run_dir: str, manifest: ModelManifest) -> np.ndarray | None:
+    """Return cached `(132, 224, C)` 24 km B0 probabilities for the case, if finished."""
+    b0_dir = os.path.join(os.path.dirname(run_dir), "hrrr_24km_earth")
+    meta_path = os.path.join(b0_dir, "meta.json")
+    probs_path = os.path.join(b0_dir, "probs.npz")
+    if not (os.path.exists(meta_path) and os.path.exists(probs_path)):
+        return None
+    try:
+        with open(meta_path) as handle:
+            meta = json.load(handle)
+        if meta.get("schema_version") != SCHEMA_VERSION or meta.get("status") != "ok":
+            return None
+        if list(meta.get("served_classes", [])) != list(manifest.served_classes):
+            return None
+        expected_shape = (*native_grid(8).shape, len(manifest.served_classes))
+        with np.load(probs_path) as stored:
+            if not all(cls in stored.files for cls in manifest.served_classes):
+                return None
+            b0 = np.stack([stored[cls] for cls in manifest.served_classes], axis=-1).astype(np.float32)
+        return b0 if b0.shape == expected_shape else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _execute(
     run_dir: str, config: PilotConfig, cycle: ForecastCycle, backend: Backend, manifest: ModelManifest
 ) -> dict[str, Any]:
     # Model load stays outside the timers so only the first run doesn't pay for it.
-    predictor = backend.load_predictor()
+    if config.refiner:
+        if backend.load_refiner is None or backend.refine is None:
+            raise RuntimeError("backend does not support refiner configs")
+        cached_b0 = _load_cached_b0(run_dir, manifest)
+        predictor = None if cached_b0 is not None else backend.load_predictor()
+        refiner, ref_mean, ref_std = backend.load_refiner()
+    else:
+        cached_b0 = None
+        predictor = backend.load_predictor()
+        refiner = ref_mean = ref_std = None
     low, high = backend.load_norm_ranges()
     peak_is_per_run = reset_peak_rss()
 
@@ -287,12 +324,19 @@ def _execute(
     source = backend.make_source(config)
     input_grid = assemble_model_input(manifest, source, cycle)
     stored_grid = source.grid
-    if config.source == "ifs_regional":
+    input_24km: np.ndarray | None = None
+    if config.refiner and cached_b0 is None:
+        source_24km = backend.make_source(CONFIGS["hrrr_24km_earth"])
+        input_24km = assemble_model_input(manifest, source_24km, cycle)
+    elif config.source == "ifs_regional":
         stored_grid = eval_grid_0p25() if config.target == "latlon_0p25" else native_grid(config.coarsen)
         input_grid = resample_to_grid(input_grid, source.grid, stored_grid)
     fetched = time.perf_counter()
 
-    if config.source == "ifs":
+    if config.refiner:
+        probs_24km = cached_b0 if cached_b0 is not None else backend.regional(predictor, input_24km, manifest)
+        output = backend.refine(refiner, input_grid, probs_24km, ref_mean, ref_std, manifest)
+    elif config.source == "ifs":
         output = backend.tiled(
             predictor,
             input_grid,
@@ -431,12 +475,32 @@ def real_backend(root: str, manifest: ModelManifest, ifs_source: str = "aws") ->
 
         return run_tiled_inference(*args, **kwargs)
 
+    def load_refiner() -> tuple[Any, np.ndarray, np.ndarray]:
+        from frontfinder.inference.refiner import (
+            REFINER_NORM_FILENAME,
+            REFINER_WEIGHTS_FILENAME,
+            RefinerPredictor,
+            load_refiner_norm,
+        )
+
+        ref_weights = os.path.join(root, "weights", REFINER_WEIGHTS_FILENAME)
+        ref_norm = os.path.join(root, "weights", REFINER_NORM_FILENAME)
+        mean, std = load_refiner_norm(ref_norm)
+        return RefinerPredictor(ref_weights), mean, std
+
+    def refine(*args: Any, **kwargs: Any) -> np.ndarray:
+        from frontfinder.inference.refiner import run_c1_refinement
+
+        return run_c1_refinement(*args, **kwargs)
+
     return Backend(
         make_source=make_source,
         load_predictor=_once(load_predictor),
         load_norm_ranges=_once(lambda: load_norm_ranges(weights_path, manifest.n_channels)),
         regional=regional,
         tiled=tiled,
+        load_refiner=_once(load_refiner),
+        refine=refine,
     )
 
 
@@ -546,6 +610,7 @@ def dry_run_backend(manifest: ModelManifest) -> Backend:
     except ImportError:
         regional = _stub_regional
     from frontfinder.inference.engine import run_tiled_inference
+    from frontfinder.inference.refiner import FakeRefinerPredictor, run_c1_refinement
 
     n_channels = manifest.n_channels
     return Backend(
@@ -554,6 +619,10 @@ def dry_run_backend(manifest: ModelManifest) -> Backend:
         load_norm_ranges=lambda: (np.full(n_channels, -100.0), np.full(n_channels, 500.0)),
         regional=regional,
         tiled=run_tiled_inference,
+        load_refiner=_once(
+            lambda: (FakeRefinerPredictor(), np.zeros(n_channels, dtype=np.float32), np.ones(n_channels, dtype=np.float32))
+        ),
+        refine=run_c1_refinement,
     )
 
 

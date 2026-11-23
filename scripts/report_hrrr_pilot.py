@@ -41,6 +41,7 @@ SAME_DOMAIN_REFERENCES = {
     "hrrr_latlon_0p25_earth": "ifs_regional_0p25",
     "hrrr_24km_earth": "ifs_regional_24km",
     "hrrr_24km_grid": "ifs_regional_24km",
+    "hrrr_3km_c1": "ifs_regional_24km",
 }
 KM_PER_DEGREE = 111.32
 EVAL_SPACING_DEG = 0.25
@@ -474,6 +475,8 @@ def _panel_label(config: str) -> str:
         return "IFS 0.25°, HRRR-sized box"
     if config == "ifs_regional_24km":
         return "IFS on HRRR 24 km grid"
+    if config == "hrrr_3km_c1":
+        return "HRRR 3 km, C1 refiner"
     match = re.fullmatch(r"hrrr_(\d+)km_(earth|grid)", config)
     return f"HRRR {match[1]} km, {match[2]} winds" if match else config
 

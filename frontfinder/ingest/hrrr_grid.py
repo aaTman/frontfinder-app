@@ -10,11 +10,16 @@ that message's own lat/lon array through `HRRR_CRS` reproduces a uniform
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
 import numpy as np
 import pyproj
 
 from frontfinder.ingest.base import GridSpec
+
+# About 770 km at 24 km (256 cells at 3 km), where a regional crop loses boundary context.
+LOW_CONFIDENCE_MARGIN_CELLS = 32
+RING_STRIDE = 4
 
 HRRR_CRS = "+proj=lcc +lat_0=38.5 +lon_0=-97.5 +lat_1=38.5 +lat_2=38.5 +R=6371229 +units=m +no_defs"
 HRRR_NX = 1799
@@ -68,3 +73,57 @@ def native_grid(coarsen: int = 1) -> GridSpec:
 def eval_grid_0p25() -> GridSpec:
     """The common 0.25deg comparison grid (103 rows, 207 columns)."""
     return GridSpec.regular_latlon("hrrr-eval-0p25", EVAL_LAT_DEG, EVAL_LON_DEG)
+
+
+def _scale_from_24km(grid: GridSpec) -> int:
+    return max(1, round(24000.0 / abs(float(grid.x[1] - grid.x[0]))))
+
+
+def edge_bounds(grid: GridSpec) -> list[float]:
+    """[xMin, yMin, xMax, yMax] of the cell edges, in CRS units."""
+    dx = abs(float(grid.x[1] - grid.x[0]))
+    dy = abs(float(grid.y[1] - grid.y[0]))
+    return [
+        float(grid.x.min()) - dx / 2,
+        float(grid.y.min()) - dy / 2,
+        float(grid.x.max()) + dx / 2,
+        float(grid.y.max()) + dy / 2,
+    ]
+
+
+def _ring(grid: GridSpec, margin: int, stride: int = RING_STRIDE) -> list[list[float]]:
+    """Closed lon/lat ring around the cells `margin` in from each edge."""
+    rows, cols = grid.shape
+    top, bottom, left, right = margin, rows - 1 - margin, margin, cols - 1 - margin
+    cells = (
+        [(top, c) for c in range(left, right, stride)]
+        + [(r, right) for r in range(top, bottom, stride)]
+        + [(bottom, c) for c in range(right, left, -stride)]
+        + [(r, left) for r in range(bottom, top, -stride)]
+    )
+    ring = [
+        [round((float(grid.lon[r, c]) + 180.0) % 360.0 - 180.0, 4), round(float(grid.lat[r, c]), 4)] for r, c in cells
+    ]
+    return [*ring, ring[0]]
+
+
+def domain_geojson(grid: GridSpec, margin: int | None = None) -> dict[str, Any]:
+    """The lower-confidence edge band: the domain with its interior cut out."""
+    scale = _scale_from_24km(grid)
+    resolved_margin = LOW_CONFIDENCE_MARGIN_CELLS * scale if margin is None else margin
+    if 2 * resolved_margin >= min(grid.shape):
+        raise ValueError(f"margin {resolved_margin} leaves no interior on a {grid.shape} grid")
+    stride = RING_STRIDE * scale
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"kind": "low_confidence_edge", "margin_cells": resolved_margin},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [_ring(grid, 0, stride=stride), _ring(grid, resolved_margin, stride=stride)[::-1]],
+                },
+            }
+        ],
+    }

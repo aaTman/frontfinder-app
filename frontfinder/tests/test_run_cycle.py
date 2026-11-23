@@ -6,6 +6,7 @@ import pytest
 import xarray as xr
 
 from frontfinder.config.manifests import ALL_CLASSES, THETA_E_UV_Q_MANIFEST, MODEL_1702_MANIFEST
+from frontfinder.ingest.base import FieldSource
 from frontfinder.ingest.ecmwf_ifs import FakeIFSFieldSource, IFSCycle
 from frontfinder.scheduler.run_cycle import ModelRunConfig, run_cycle, run_one_model
 
@@ -644,3 +645,110 @@ def test_run_cycle_resume_adds_pressure_to_steps_it_skips(tiny_source, tmp_path)
         "2026-08-19T12Z_f000.pressure.geojson",
         "2026-08-19T12Z_f006.pressure.geojson",
     ]
+
+
+class _FakeHRRRSource(FieldSource):
+    """Minimal synthetic `FieldSource` on an HRRR grid, offline with no GRIB decoding."""
+
+    def __init__(self, grid):
+        self._grid = grid
+        self.fetched_steps: list[int] = []
+
+    @property
+    def source_id(self) -> str:
+        return "fake_hrrr"
+
+    @property
+    def grid(self):
+        return self._grid
+
+    def _band(self) -> np.ndarray:
+        lat, lon = self._grid.lat, (self._grid.lon + 180.0) % 360.0 - 180.0
+        return (10.0 * np.exp(-(((lat - 38.0) / 2.0) ** 2 + ((lon + 97.0) / 8.0) ** 2))).astype(np.float32)
+
+    def fetch_pressure_level(self, variable: str, level_hpa: int, cycle: IFSCycle | object) -> np.ndarray:
+        self.fetched_steps.append(cycle.step)
+        if variable in ("u_component_of_wind", "v_component_of_wind"):
+            return self._band()
+        if variable == "temperature":
+            return np.full(self._grid.shape, 285.0 * (level_hpa / 1000.0) ** 0.286, dtype=np.float32)
+        if variable == "specific_humidity":
+            return np.full(self._grid.shape, 0.005 * level_hpa / 1000.0, dtype=np.float32)
+        raise ValueError(f"unsupported variable {variable!r}")
+
+    def fetch_single_level(self, variable: str, cycle: IFSCycle | object) -> np.ndarray:
+        if variable in ("10m_u_component_of_wind", "10m_v_component_of_wind"):
+            return self._band()
+        raise ValueError(f"unsupported single level {variable!r}")
+
+    def fetch_static(self, variable: str) -> np.ndarray:
+        return np.zeros(self._grid.shape, dtype=np.float32)
+
+
+def test_run_hrrr_cycle_writes_3km_pyramid_domain_and_latest_pointer(tmp_path):
+    from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST as NBS
+    from frontfinder.inference.refiner import FakeRefinerPredictor
+    from frontfinder.ingest.hrrr_grid import native_grid
+    from frontfinder.scheduler.run_cycle import HRRR_3KM_MODEL_KEY, HRRRRunConfig, run_hrrr_cycle
+
+    class NbsPredictor:
+        def predict_batch(self, patches: np.ndarray) -> np.ndarray:
+            out = np.full((*patches.shape[:3], len(NBS.all_classes)), 0.01, dtype=np.float32)
+            out[..., 0] = 0.0
+            out[..., 0] = np.clip(1.0 - out.sum(axis=-1), 0.1, None)
+            return out / out.sum(axis=-1, keepdims=True)
+
+    run_config = HRRRRunConfig(
+        manifest=NBS,
+        base_predictor=NbsPredictor(),
+        refiner=FakeRefinerPredictor(),
+        refiner_mean=np.zeros(NBS.n_channels, dtype=np.float32),
+        refiner_std=np.ones(NBS.n_channels, dtype=np.float32),
+    )
+    source_3km = _FakeHRRRSource(native_grid(1))
+    source_24km = _FakeHRRRSource(native_grid(8))
+
+    paths = run_hrrr_cycle(run_config, source_3km, source_24km, "2026-08-19", 12, str(tmp_path), steps=(0, 6))
+
+    assert [os.path.basename(p) for p in paths] == ["2026-08-19T12Z_f000.zarr", "2026-08-19T12Z_f006.zarr"]
+    model_dir = tmp_path / HRRR_3KM_MODEL_KEY
+    pointer = json.loads((model_dir / "latest.json").read_text())
+    assert pointer["cycle_time"] == "2026-08-19T12:00:00"
+    assert [s["step_hours"] for s in pointer["steps"]] == [0, 6]
+    assert pointer["expected_steps"] == [0, 6]
+    assert pointer["source_label"] == "HRRR"
+    assert pointer["grid"]["name"] == "hrrr-conus-3km"
+    domain = json.loads((model_dir / pointer["domain"]).read_text())
+    assert domain["features"][0]["properties"]["margin_cells"] == 256
+
+
+def test_run_hrrr_cycle_skips_already_written_steps_on_resume(tmp_path):
+    from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST as NBS
+    from frontfinder.inference.refiner import FakeRefinerPredictor
+    from frontfinder.ingest.hrrr_grid import native_grid
+    from frontfinder.scheduler.run_cycle import HRRRRunConfig, run_hrrr_cycle
+
+    class NbsPredictor:
+        def predict_batch(self, patches: np.ndarray) -> np.ndarray:
+            out = np.full((*patches.shape[:3], len(NBS.all_classes)), 0.01, dtype=np.float32)
+            return out / out.sum(axis=-1, keepdims=True)
+
+    run_config = HRRRRunConfig(
+        manifest=NBS,
+        base_predictor=NbsPredictor(),
+        refiner=FakeRefinerPredictor(),
+        refiner_mean=np.zeros(NBS.n_channels, dtype=np.float32),
+        refiner_std=np.ones(NBS.n_channels, dtype=np.float32),
+    )
+    source_3km = _FakeHRRRSource(native_grid(1))
+    source_24km = _FakeHRRRSource(native_grid(8))
+
+    first = run_hrrr_cycle(run_config, source_3km, source_24km, "2026-08-19", 12, str(tmp_path), steps=(0,))
+    assert len(first) == 1
+
+    source_3km.fetched_steps.clear()
+    source_24km.fetched_steps.clear()
+    second = run_hrrr_cycle(run_config, source_3km, source_24km, "2026-08-19", 12, str(tmp_path), steps=(0, 6))
+    assert len(second) == 2
+    assert set(source_3km.fetched_steps) == {6}
+    assert set(source_24km.fetched_steps) == {6}
