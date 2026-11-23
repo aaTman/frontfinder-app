@@ -26,6 +26,7 @@ from frontfinder.ingest.hrrr import (
     _interpolate_to_eval,
     _is_complete_grib2,
     _parse_idx,
+    hrrr_target_steps_for_cycle,
     rotate_grid_to_earth,
 )
 from frontfinder.ingest.hrrr_grid import (
@@ -772,3 +773,16 @@ def test_end_to_end_with_real_grib_messages(monkeypatch, tmp_path):
         )
         assert u_earth[row, col] == pytest.approx(expected_u, abs=1e-3)
         assert v_earth[row, col] == pytest.approx(expected_v, abs=1e-3)
+
+
+def test_target_steps_are_hourly_and_stay_inside_noaas_publish_length():
+    # HRRR's value is the hourly cadence, so the target list steps every hour rather
+    # than every 6 h. The lengths are NOAA's, not ours: out-of-range lead hours are a
+    # 404 on the .idx, which would silently drop steps from latest.json.
+    assert hrrr_target_steps_for_cycle(0) == tuple(range(0, 49))
+    assert hrrr_target_steps_for_cycle(12) == tuple(range(0, 49))
+    assert hrrr_target_steps_for_cycle(6) == tuple(range(0, 19))
+    assert hrrr_target_steps_for_cycle(18) == tuple(range(0, 19))
+    assert hrrr_target_steps_for_cycle(3) == tuple(range(0, 19))
+    with pytest.raises(ValueError, match="0..23"):
+        hrrr_target_steps_for_cycle(24)
