@@ -565,14 +565,36 @@ def run_one_hrrr_step(
     source_24km: FieldSource,
     cycle: ForecastCycle,
     output_root: str,
+    save_orientation_fields: bool = False,
 ) -> str:
-    """Assemble 24 km + 3 km HRRR inputs, run B0 + C1 refinement, and write packed zarr."""
+    """Assemble 24 km + 3 km HRRR inputs, run B0 + C1 refinement, and write packed zarr.
+
+    `save_orientation_fields` (the same "front lines are on" flag `run_one_model`
+    takes) additionally writes the two sidecars `postprocess.front_lines` derives
+    the overlay from next to the store: `<store>.probs.npz` with the exact float32
+    level-0 grids -- keyed by x/y/crs, since this store stays on HRRR's native
+    projected grid -- saved BEFORE the (always-on) uint8 packing mutates the
+    pyramid, and `<store>.fields.npz` with the 850 hPa theta-e/wind channels
+    thinned to every other cell. Both are best effort like the IFS side: without
+    them the lines fall back to the packed values or skip the step, and
+    inference/publishing never notice."""
     manifest = run_config.manifest
     logger.info("running HRRR 3 km C1 step for cycle=%s", cycle)
     input_24km = assemble_field_source_input(manifest, source_24km, cycle)
     probs_24km = run_regional_inference(run_config.base_predictor, input_24km, manifest)
 
     input_3km = assemble_field_source_input(manifest, source_3km, cycle)
+    orientation_fields = None
+    if save_orientation_fields:
+        # Copied now, before refinement gets a chance to reuse the grid (see
+        # run_one_model). Best effort: the 850 hPa fields only decide which
+        # side the viewer's front symbols go on.
+        try:
+            from frontfinder.postprocess.front_lines import extract_native_orientation_fields
+
+            orientation_fields = extract_native_orientation_fields(manifest, input_3km, source_3km.grid)
+        except Exception:
+            logger.exception("could not extract orientation fields for HRRR cycle %s -- continuing without", cycle)
     probs_3km = run_c1_refinement(
         run_config.refiner,
         input_3km,
@@ -594,7 +616,23 @@ def run_one_hrrr_step(
 
     model_dir = os.path.join(output_root, run_config.model_key)
     os.makedirs(model_dir, exist_ok=True)
-    store_path = os.path.join(model_dir, _store_name(cycle))
+    store_name = _store_name(cycle)
+    store_path = os.path.join(model_dir, store_name)
+    if save_orientation_fields:
+        # HRRR stores are always uint8-packed, so this sidecar is what the
+        # lines come out of exactly. Saved BEFORE the write because packing
+        # mutates the pyramid in place.
+        try:
+            from frontfinder.postprocess.front_lines import probabilities_filename, save_probabilities_sidecar
+            from frontfinder.postprocess.grid_geom import NativeGridCoords
+
+            save_probabilities_sidecar(
+                pyramid.datatree["0"].to_dataset(),
+                os.path.join(model_dir, probabilities_filename(store_name)),
+                coords=NativeGridCoords.from_grid_spec(source_3km.grid),
+            )
+        except Exception:
+            logger.exception("could not save the probabilities sidecar for %s -- front lines will use packed values", store_path)
     temp_store = f"{store_path}.tmp"
     shutil.rmtree(temp_store, ignore_errors=True)
     try:
@@ -604,6 +642,13 @@ def run_one_hrrr_step(
         shutil.rmtree(temp_store, ignore_errors=True)
         raise
     logger.info("wrote %s", store_path)
+    if orientation_fields is not None:
+        try:
+            from frontfinder.postprocess.front_lines import fields_filename, save_orientation_fields as save_fields
+
+            save_fields(orientation_fields, os.path.join(model_dir, fields_filename(store_name)))
+        except Exception:
+            logger.exception("could not save orientation fields for %s -- continuing without", store_path)
     return store_path
 
 
@@ -615,10 +660,28 @@ def run_hrrr_cycle(
     run_hour: int,
     output_root: str,
     steps: tuple[int, ...] | None = None,
+    front_lines: bool = False,
+    front_line_threshold: float | None = None,
 ) -> list[str]:
-    """Run every step of one HRRR cycle, progressively updating `latest.json`."""
+    """Run every step of one HRRR cycle, progressively updating `latest.json`.
+
+    `front_lines` / `front_line_threshold` behave exactly like `run_cycle`'s:
+    each written step additionally gets its `<step>.fronts.geojson` derived
+    from the sidecars `run_one_hrrr_step` saved, listed as a `"fronts"` key on
+    that step's `latest.json` entry. It never changes the stores, and any
+    failure there is logged and swallowed -- inference and publishing carry
+    on exactly as without it."""
     if steps is None:
         steps = hrrr_target_steps_for_cycle(run_hour)
+    front_line_config = None
+    if front_lines:
+        try:
+            from frontfinder.postprocess.front_lines import default_config
+
+            front_line_config = default_config(front_line_threshold)
+        except Exception:
+            logger.exception("front lines unavailable (could not import the splines module) -- continuing without them")
+            front_lines = False
     store_paths: list[str] = []
     step_entries: list[dict] = []
     for step in steps:
@@ -630,12 +693,19 @@ def run_hrrr_cycle(
             store_path = existing_store_path
         else:
             try:
-                store_path = run_one_hrrr_step(run_config, source_3km, source_24km, cycle, output_root)
+                extra = {"save_orientation_fields": True} if front_lines else {}
+                store_path = run_one_hrrr_step(run_config, source_3km, source_24km, cycle, output_root, **extra)
             except Exception:
                 logger.exception("HRRR %s failed for cycle %s -- skipping this step", run_config.model_key, cycle)
                 continue
         store_paths.append(store_path)
         step_entries.append({"step_hours": step, "valid_time": _valid_time(cycle), "store": store_name})
+        if front_lines:
+            from frontfinder.postprocess.front_lines import attach_front_lines
+
+            # Re-derives every published step so far (tracking needs the
+            # whole sequence, in order) and never raises.
+            attach_front_lines(os.path.join(output_root, run_config.model_key), step_entries, front_line_config)
         _write_hrrr_latest_pointer(
             output_root,
             run_config.model_key,
