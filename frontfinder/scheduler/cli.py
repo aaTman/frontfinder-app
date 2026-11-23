@@ -31,10 +31,18 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from frontfinder.config.manifests import NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST  # MODEL_1702_MANIFEST -- see module docstring
+from frontfinder.inference.engine import KerasPredictor, Predictor
+from frontfinder.inference.refiner import (
+    REFINER_NORM_FILENAME,
+    REFINER_WEIGHTS_FILENAME,
+    RefinerPredictor,
+    load_refiner_norm,
+)
+from frontfinder.ingest.base import ForecastCycle
 from frontfinder.ingest.ecmwf_ifs import EcmwfOpenDataSource, IFSCycle, target_steps_for_cycle
-from frontfinder.inference.engine import KerasPredictor
+from frontfinder.ingest.hrrr import HRRRFieldSource, hrrr_target_steps_for_cycle
 from frontfinder.scheduler.retention import prune_old_cache_files, prune_old_output_stores
-from frontfinder.scheduler.run_cycle import ModelRunConfig, run_cycle
+from frontfinder.scheduler.run_cycle import HRRR_3KM_MODEL_KEY, HRRRRunConfig, ModelRunConfig, run_cycle, run_hrrr_cycle
 
 SYNOPTIC_HOURS = (0, 6, 12, 18)
 
@@ -135,6 +143,11 @@ def _cycle_is_complete(output_root: str, model_name: str, date: str, run_hour: i
     return target.issubset(_steps_present_for_cycle(output_root, model_name, date, run_hour))
 
 
+def _hrrr_cycle_is_complete(output_root: str, model_key: str, date: str, run_hour: int) -> bool:
+    target = set(hrrr_target_steps_for_cycle(run_hour))
+    return target.issubset(_steps_present_for_cycle(output_root, model_key, date, run_hour))
+
+
 def _cycles_after(after: tuple[str, int] | None, current: tuple[str, int]) -> list[tuple[str, int]]:
     """Every synoptic cycle strictly after `after` up to and including
     `current`, in ascending order -- the backlog `--poll` needs to check
@@ -182,6 +195,26 @@ def build_run_configs(model_dir: str) -> list[ModelRunConfig]:
         # use (this deployment runs CPU-only). Its manifest/predictor are still
         # in the codebase; re-add a ModelRunConfig here to bring it back.
     ]
+
+
+def build_hrrr_run_config(model_dir: str, base_predictor: Predictor | None = None) -> HRRRRunConfig | None:
+    """Load the C1 3 km HRRR refiner config when weights and norm stats are present."""
+    ref_weights = os.path.join(model_dir, REFINER_WEIGHTS_FILENAME)
+    ref_norm = os.path.join(model_dir, REFINER_NORM_FILENAME)
+    if not (os.path.exists(ref_weights) and os.path.exists(ref_norm)):
+        logger.warning("HRRR C1 refiner files not found in %s -- skipping HRRR", model_dir)
+        return None
+    manifest = NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST
+    if base_predictor is None:
+        base_predictor = KerasPredictor(os.path.join(model_dir, manifest.weights_filename))
+    mean, std = load_refiner_norm(ref_norm)
+    return HRRRRunConfig(
+        manifest=manifest,
+        base_predictor=base_predictor,
+        refiner=RefinerPredictor(ref_weights),
+        refiner_mean=mean,
+        refiner_std=std,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -269,6 +302,17 @@ def main(argv: list[str] | None = None) -> int:
             "or publishing."
         ),
     )
+    parser.add_argument(
+        "--hrrr",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="also run HRRR 3 km C1 refiner as new HRRR cycles become available (default: on; --no-hrrr to skip)",
+    )
+    parser.add_argument(
+        "--hrrr-cache-dir",
+        default=None,
+        help="directory for cached HRRR GRIB2 messages (default: <cache-dir>/hrrr)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -280,6 +324,16 @@ def main(argv: list[str] | None = None) -> int:
     # live in --model-dir on the serving VM.
     source = EcmwfOpenDataSource(cache_dir=args.cache_dir, source=args.ifs_source, static_data_dir=args.model_dir)
     run_configs = build_run_configs(args.model_dir)
+    base_predictor = next(
+        (rc.predictor for rc in run_configs if rc.manifest.name == NBS_SQUARE_DILATION_TROF_TT_NO_DEWPOINT_MANIFEST.name),
+        None,
+    )
+
+    now = datetime.now(timezone.utc)
+    ifs_cycle: tuple[str, int] | None = None
+    hrrr_cycle: tuple[str, int] | None = None
+    source_3km: HRRRFieldSource | None = None
+    source_24km: HRRRFieldSource | None = None
 
     if args.poll:
         # 2026-10-02: newest PUBLISHED cycle ONLY -- no backlog backfill. The
@@ -291,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         # while the nominal newest cycle is still being published. A
         # partially-written target cycle is re-run to fill its missing steps
         # (already-written steps are cheap skips in run_cycle).
-        d = datetime.strptime("%s %02d" % most_recent_completed_cycle(datetime.now(timezone.utc), publish_lag_hours=0), "%Y-%m-%d %H")
+        d = datetime.strptime("%s %02d" % most_recent_completed_cycle(now, publish_lag_hours=0), "%Y-%m-%d %H")
         target = None
         for _ in range(4):
             cand = IFSCycle(date=d.strftime("%Y-%m-%d"), run_hour=d.hour, step=0)
@@ -301,42 +355,85 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("cycle %s-%02dZ not published yet -- trying the previous cycle", cand.date, cand.run_hour)
             d -= timedelta(hours=6)
         if target is None:
-            logger.info("no cycle in the last 24h is published -- will check again next poll")
-            return 0
-        target_date, target_hour = target.date, target.run_hour
-        if all(
-            _cycle_is_complete(args.output_root, rc.manifest.name, target_date, target_hour) for rc in run_configs
-        ):
-            logger.info("cycle %s-%02dZ already has output -- nothing to do", target_date, target_hour)
-            return 0
-        logger.info("cycle %s-%02dZ available -- triggering run", target_date, target_hour)
-        cycle_date, run_hour = target_date, target_hour
+            logger.info("no IFS cycle in the last 24h is published")
+        elif all(_cycle_is_complete(args.output_root, rc.manifest.name, target.date, target.run_hour) for rc in run_configs):
+            logger.info("IFS cycle %s-%02dZ already has output -- nothing to do", target.date, target.run_hour)
+        else:
+            logger.info("IFS cycle %s-%02dZ available -- triggering run", target.date, target.run_hour)
+            ifs_cycle = (target.date, target.run_hour)
     else:
-        cycle_date, run_hour = most_recent_completed_cycle(datetime.now(timezone.utc), args.publish_lag_hours)
+        ifs_cycle = most_recent_completed_cycle(now, args.publish_lag_hours)
 
-    results = run_cycle(
-        run_configs,
-        source,
-        cycle_date,
-        run_hour,
-        args.output_root,
-        front_lines=args.front_lines,
-        front_line_threshold=args.front_line_threshold,
-        pressure=args.pressure,
-    )
-    logger.info(
-        "cycle %s-%02dZ complete: %s",
-        cycle_date, run_hour, {name: len(paths) for name, paths in results.items()},
-    )
+    if (
+        args.hrrr
+        and os.path.exists(os.path.join(args.model_dir, REFINER_WEIGHTS_FILENAME))
+        and os.path.exists(os.path.join(args.model_dir, REFINER_NORM_FILENAME))
+    ):
+        hrrr_cache_dir = args.hrrr_cache_dir or os.path.join(args.cache_dir, "hrrr")
+        source_3km = HRRRFieldSource(cache_dir=hrrr_cache_dir, coarsen=1, wind_frame="earth")
+        source_24km = HRRRFieldSource(cache_dir=hrrr_cache_dir, coarsen=8, wind_frame="earth")
+        if args.poll:
+            hd = datetime.strptime("%s %02d" % most_recent_completed_cycle(now, publish_lag_hours=0), "%Y-%m-%d %H")
+            htarget = None
+            for _ in range(4):
+                hcand = ForecastCycle(date=hd.strftime("%Y-%m-%d"), run_hour=hd.hour, step=0)
+                if source_24km.is_cycle_available(hcand):
+                    htarget = hcand
+                    break
+                logger.info("HRRR cycle %s-%02dZ not published yet -- trying the previous cycle", hcand.date, hcand.run_hour)
+                hd -= timedelta(hours=6)
+            if htarget is None:
+                logger.info("no HRRR cycle in the last 24h is published")
+            elif _hrrr_cycle_is_complete(args.output_root, HRRR_3KM_MODEL_KEY, htarget.date, htarget.run_hour):
+                logger.info("HRRR cycle %s-%02dZ already complete -- nothing to do", htarget.date, htarget.run_hour)
+            else:
+                logger.info("HRRR cycle %s-%02dZ available -- triggering run", htarget.date, htarget.run_hour)
+                hrrr_cycle = (htarget.date, htarget.run_hour)
+        else:
+            hrrr_cycle = most_recent_completed_cycle(now, publish_lag_hours=2)
+
+    if args.poll and ifs_cycle is None and hrrr_cycle is None:
+        return 0
+
+    results: dict[str, list[str]] = {}
+    if ifs_cycle is not None:
+        cycle_date, run_hour = ifs_cycle
+        results = run_cycle(
+            run_configs,
+            source,
+            cycle_date,
+            run_hour,
+            args.output_root,
+            front_lines=args.front_lines,
+            front_line_threshold=args.front_line_threshold,
+            pressure=args.pressure,
+        )
+        logger.info(
+            "cycle %s-%02dZ complete: %s",
+            cycle_date, run_hour, {name: len(paths) for name, paths in results.items()},
+        )
+
+    hrrr_results: list[str] = []
+    if hrrr_cycle is not None and source_3km is not None and source_24km is not None:
+        hrrr_date, hrrr_hour = hrrr_cycle
+        try:
+            hrrr_config = build_hrrr_run_config(args.model_dir, base_predictor=base_predictor)
+            if hrrr_config is not None:
+                hrrr_results = run_hrrr_cycle(
+                    hrrr_config, source_3km, source_24km, hrrr_date, hrrr_hour, args.output_root
+                )
+                logger.info("HRRR cycle %s-%02dZ complete: %d step(s)", hrrr_date, hrrr_hour, len(hrrr_results))
+        except Exception:
+            logger.exception("HRRR cycle %s-%02dZ failed", hrrr_date, hrrr_hour)
 
     # Retention runs regardless of whether this cycle's run_cycle() fully
     # succeeded -- a failed model run shouldn't also block disk cleanup, and
     # pruning failures shouldn't crash a cycle that otherwise succeeded, so
     # this is wrapped in its own try/except rather than left to propagate.
     try:
-        now = datetime.now(timezone.utc)
-        deleted_stores = prune_old_output_stores(args.output_root, args.retention_days, now)
-        deleted_cache = prune_old_cache_files(args.cache_dir, args.retention_days, now)
+        prune_now = datetime.now(timezone.utc)
+        deleted_stores = prune_old_output_stores(args.output_root, args.retention_days, prune_now)
+        deleted_cache = prune_old_cache_files(args.cache_dir, args.retention_days, prune_now)
         logger.info(
             "retention: deleted %d old output store(s), %d old cache file(s) (older than %d days)",
             len(deleted_stores), len(deleted_cache), args.retention_days,
@@ -344,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         logger.exception("retention pruning failed -- leaving old files in place rather than risk a bad delete")
 
-    return 0 if results else 1
+    return 0 if (results or hrrr_results) else 1
 
 
 if __name__ == "__main__":

@@ -390,3 +390,32 @@ export function pressureInitialState(paramValue, storedValue, defaultOn = true) 
   if (storedValue === "0") return false;
   return defaultOn;
 }
+
+// ---------------------------------------------------------------------------
+// Regional models. A regional model's latest.json carries a `grid` block with
+// its CRS and edge bounds, and optionally a `domain` GeoJSON marking the band
+// near the boundary where the model lost context. A pointer without `grid` is
+// a global lat/lon model and keeps the defaults.
+// ---------------------------------------------------------------------------
+
+// The ZarrLayer options that place one model's store on the map.
+export function layerGridOptions(grid, globalBounds, globalLatAscending) {
+  if (!grid) return { bounds: globalBounds, latIsAscending: globalLatAscending };
+  return {
+    bounds: grid.bounds,
+    latIsAscending: grid.lat_ascending,
+    proj4: grid.proj4,
+    spatialDimensions: grid.dimensions,
+  };
+}
+
+// Where a model's domain overlay lives, or null if it publishes none.
+export function domainUrl(zarrRoot, modelKey, domain) {
+  if (typeof domain !== "string" || domain === "") return null;
+  return `${zarrRoot}/${modelKey}/${domain}`;
+}
+
+// The panel's cycle label, named for the model's data source.
+export function initializationLabel(sourceLabel, formattedTime) {
+  return `${sourceLabel || "IFS"} Initialization ${formattedTime}`;
+}

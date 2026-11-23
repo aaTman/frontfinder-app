@@ -24,24 +24,44 @@ cycle, sorted ascending, for the webapp's slider to read.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import numpy as np
+
 from frontfinder.config.manifests import MANIFESTS, ModelManifest
 from frontfinder.inference.engine import Predictor, run_tiled_inference
+from frontfinder.inference.refiner import RefinerModel, run_c1_refinement
+from frontfinder.inference.regional import run_regional_inference
+from frontfinder.ingest.assembly import assemble_model_input as assemble_field_source_input
+from frontfinder.ingest.base import FieldSource, ForecastCycle, GridSpec
 from frontfinder.ingest.ecmwf_ifs import (
     IFSCycle,
     IFSFieldSource,
     assemble_model_input,
     target_steps_for_cycle,
 )
-from frontfinder.zarrio.pyramid import FrontFields, build_front_pyramid, pack_uint8_enabled, write_front_pyramid
+from frontfinder.ingest.hrrr import hrrr_target_steps_for_cycle
+from frontfinder.ingest.hrrr_grid import domain_geojson, edge_bounds
+from frontfinder.zarrio.pyramid import (
+    REGIONAL_N_LEVELS,
+    FrontFields,
+    RegionalFrontFields,
+    build_front_pyramid,
+    build_regional_pyramid,
+    pack_uint8_enabled,
+    write_front_pyramid,
+)
 
 logger = logging.getLogger(__name__)
+
+HRRR_3KM_MODEL_KEY = "hrrr-3km"
 
 
 @dataclass(frozen=True)
@@ -479,3 +499,149 @@ def run_cycle(
 
 def known_model_names() -> list[str]:
     return sorted(MANIFESTS)
+
+
+@dataclass(frozen=True)
+class HRRRRunConfig:
+    """Everything needed to run and publish one HRRR 3 km C1-refined forecast cycle."""
+
+    manifest: ModelManifest
+    base_predictor: Predictor
+    refiner: RefinerModel
+    refiner_mean: np.ndarray
+    refiner_std: np.ndarray
+    model_key: str = HRRR_3KM_MODEL_KEY
+    n_pyramid_levels: int = REGIONAL_N_LEVELS
+
+
+def _write_json_atomic(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp-{os.getpid()}"
+    try:
+        with open(tmp_path, "w") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _write_hrrr_latest_pointer(
+    output_root: str,
+    model_key: str,
+    grid: GridSpec,
+    cycle: ForecastCycle,
+    step_entries: list[dict],
+    expected_steps: tuple[int, ...],
+) -> None:
+    model_dir = os.path.join(output_root, model_key)
+    os.makedirs(model_dir, exist_ok=True)
+    domain_path = os.path.join(model_dir, "domain.geojson")
+    if not os.path.exists(domain_path):
+        _write_json_atomic(domain_path, domain_geojson(grid))
+    _write_json_atomic(
+        os.path.join(model_dir, "latest.json"),
+        {
+            "cycle_time": _cycle_time(cycle),
+            "steps": step_entries,
+            "expected_steps": list(expected_steps),
+            "source_label": "HRRR",
+            "domain": "domain.geojson",
+            "grid": {
+                "name": grid.name,
+                "proj4": grid.crs,
+                "bounds": edge_bounds(grid),
+                "lat_ascending": False,
+                "dimensions": {"lat": "y", "lon": "x"},
+            },
+        },
+    )
+
+
+def run_one_hrrr_step(
+    run_config: HRRRRunConfig,
+    source_3km: FieldSource,
+    source_24km: FieldSource,
+    cycle: ForecastCycle,
+    output_root: str,
+) -> str:
+    """Assemble 24 km + 3 km HRRR inputs, run B0 + C1 refinement, and write packed zarr."""
+    manifest = run_config.manifest
+    logger.info("running HRRR 3 km C1 step for cycle=%s", cycle)
+    input_24km = assemble_field_source_input(manifest, source_24km, cycle)
+    probs_24km = run_regional_inference(run_config.base_predictor, input_24km, manifest)
+
+    input_3km = assemble_field_source_input(manifest, source_3km, cycle)
+    probs_3km = run_c1_refinement(
+        run_config.refiner,
+        input_3km,
+        probs_24km,
+        run_config.refiner_mean,
+        run_config.refiner_std,
+        manifest,
+    )
+
+    probabilities = {cls: probs_3km[..., i] for i, cls in enumerate(manifest.served_classes)}
+    fields = RegionalFrontFields(
+        probabilities=probabilities,
+        grid=source_3km.grid,
+        valid_time=_valid_time(cycle),
+        cycle_time=_cycle_time(cycle),
+        source="NOAA HRRR 3 km C1",
+    )
+    pyramid = build_regional_pyramid(fields, manifest, n_levels=run_config.n_pyramid_levels)
+
+    model_dir = os.path.join(output_root, run_config.model_key)
+    os.makedirs(model_dir, exist_ok=True)
+    store_path = os.path.join(model_dir, _store_name(cycle))
+    temp_store = f"{store_path}.tmp"
+    shutil.rmtree(temp_store, ignore_errors=True)
+    try:
+        write_front_pyramid(pyramid, temp_store, pack_uint8=True)
+        os.rename(temp_store, store_path)
+    except BaseException:
+        shutil.rmtree(temp_store, ignore_errors=True)
+        raise
+    logger.info("wrote %s", store_path)
+    return store_path
+
+
+def run_hrrr_cycle(
+    run_config: HRRRRunConfig,
+    source_3km: FieldSource,
+    source_24km: FieldSource,
+    cycle_date: str,
+    run_hour: int,
+    output_root: str,
+    steps: tuple[int, ...] | None = None,
+) -> list[str]:
+    """Run every step of one HRRR cycle, progressively updating `latest.json`."""
+    if steps is None:
+        steps = hrrr_target_steps_for_cycle(run_hour)
+    store_paths: list[str] = []
+    step_entries: list[dict] = []
+    for step in steps:
+        cycle = ForecastCycle(date=cycle_date, run_hour=run_hour, step=step)
+        store_name = _store_name(cycle)
+        existing_store_path = os.path.join(output_root, run_config.model_key, store_name)
+        if os.path.exists(existing_store_path):
+            logger.info("HRRR %s step %s already written for cycle %s -- skipping", run_config.model_key, step, cycle)
+            store_path = existing_store_path
+        else:
+            try:
+                store_path = run_one_hrrr_step(run_config, source_3km, source_24km, cycle, output_root)
+            except Exception:
+                logger.exception("HRRR %s failed for cycle %s -- skipping this step", run_config.model_key, cycle)
+                continue
+        store_paths.append(store_path)
+        step_entries.append({"step_hours": step, "valid_time": _valid_time(cycle), "store": store_name})
+        _write_hrrr_latest_pointer(
+            output_root,
+            run_config.model_key,
+            source_3km.grid,
+            cycle,
+            step_entries,
+            tuple(steps),
+        )
+    return store_paths

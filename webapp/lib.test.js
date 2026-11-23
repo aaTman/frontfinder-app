@@ -36,7 +36,41 @@ import {
   withPressureKinds,
   pressureStatus,
   pressureInitialState,
+  layerGridOptions,
+  domainUrl,
+  initializationLabel,
 } from "./lib.js";
+
+test("layerGridOptions keeps global defaults without a grid block", () => {
+  const bounds = [-180.125, -90.125, 179.875, 90.125];
+  assert.deepEqual(layerGridOptions(undefined, bounds, false), { bounds, latIsAscending: false });
+});
+
+test("layerGridOptions places a regional store in its own CRS", () => {
+  const grid = {
+    proj4: "+proj=lcc +lat_0=38.5",
+    bounds: [-2699020, -1588806, 2676979, 1579193],
+    lat_ascending: false,
+    dimensions: { lat: "y", lon: "x" },
+  };
+  assert.deepEqual(layerGridOptions(grid, [0, 0, 1, 1], true), {
+    bounds: grid.bounds,
+    latIsAscending: false,
+    proj4: grid.proj4,
+    spatialDimensions: { lat: "y", lon: "x" },
+  });
+});
+
+test("domainUrl is null when a model publishes no domain", () => {
+  assert.equal(domainUrl("/data", "hrrr-24km", "domain.geojson"), "/data/hrrr-24km/domain.geojson");
+  assert.equal(domainUrl("/data", "v2.0.1", undefined), null);
+  assert.equal(domainUrl("/data", "v2.0.1", ""), null);
+});
+
+test("initializationLabel names the source and defaults to IFS", () => {
+  assert.equal(initializationLabel("HRRR", "2026 Nov 20 12Z"), "HRRR Initialization 2026 Nov 20 12Z");
+  assert.equal(initializationLabel(undefined, "2026 Nov 20 12Z"), "IFS Initialization 2026 Nov 20 12Z");
+});
 
 test("hexToRgb01 converts pure primaries and grays", () => {
   assert.deepEqual(hexToRgb01("#ff0000"), [1, 0, 0]);

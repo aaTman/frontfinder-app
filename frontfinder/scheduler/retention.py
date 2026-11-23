@@ -44,14 +44,16 @@ _CACHE_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_\d{2}z_.*\.grib2$")
 _FRONTS_NAME_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2})T\d{2}Z(?:_f\d{3})?\.(?:fronts\.geojson|fields\.npz|probs\.npz|pressure\.geojson)$"
 )
+# HRRRFieldSource caches messages in `<cache_dir>/<YYYYMMDD>/...` subdirectories.
+_HRRR_DATE_DIR_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}|\d{8})$")
 
 
-def _parse_date(name: str, pattern: re.Pattern) -> date | None:
+def _parse_date(name: str, pattern: re.Pattern, fmt: str = "%Y-%m-%d") -> date | None:
     m = pattern.match(name)
     if not m:
         return None
     try:
-        return datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        return datetime.strptime(m.group(1), fmt).date()
     except ValueError:
         return None
 
@@ -84,7 +86,7 @@ def prune_old_output_stores(output_root: str, max_age_days: int, now: datetime) 
             continue
         for entry in sorted(os.listdir(model_dir)):
             entry_path = os.path.join(model_dir, entry)
-            if entry == "latest.json":
+            if entry in ("latest.json", "domain.geojson"):
                 continue
             fronts_date = _parse_date(entry, _FRONTS_NAME_RE) if os.path.isfile(entry_path) else None
             if fronts_date is not None:
@@ -144,4 +146,21 @@ def prune_old_cache_files(cache_dir: str, max_age_days: int, now: datetime) -> l
                 "retention: deleted cached %s (cycle date %s, older than %d days)",
                 entry_path, cycle_date, max_age_days,
             )
+
+    for hrrr_root in (cache_dir, os.path.join(cache_dir, "hrrr")):
+        if not os.path.isdir(hrrr_root):
+            continue
+        for entry in sorted(os.listdir(hrrr_root)):
+            entry_path = os.path.join(hrrr_root, entry)
+            if not os.path.isdir(entry_path):
+                continue
+            fmt = "%Y-%m-%d" if "-" in entry else "%Y%m%d"
+            cycle_date = _parse_date(entry, _HRRR_DATE_DIR_RE, fmt=fmt)
+            if cycle_date is not None and cycle_date < cutoff:
+                shutil.rmtree(entry_path)
+                deleted.append(entry_path)
+                logger.info(
+                    "retention: deleted cached %s (cycle date %s, older than %d days)",
+                    entry_path, cycle_date, max_age_days,
+                )
     return deleted

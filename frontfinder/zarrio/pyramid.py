@@ -30,8 +30,10 @@ import zarr
 from topozarr import Pyramid, create_pyramid
 
 from frontfinder.config.manifests import ModelManifest
+from frontfinder.ingest.base import GridSpec
 
 DEFAULT_N_LEVELS = 6
+REGIONAL_N_LEVELS = 3  # a 132x224 grid has no use for a coarser overview
 CRS = "EPSG:4326"  # global IFS lat/lon grid; zarr-layer reprojects client-side
 
 # topozarr's default target_chunk_bytes (512 KiB) gives level-0 chunks of
@@ -203,6 +205,49 @@ def build_front_pyramid(fields: FrontFields, manifest: ModelManifest, n_levels: 
     ds = build_level0_dataset(fields, manifest)
     return create_pyramid(
         ds, levels=n_levels, x_dim="lon", y_dim="lat", method="mean", target_chunk_bytes=SMALL_CHUNK_BYTES
+    )
+
+
+@dataclass(frozen=True)
+class RegionalFrontFields:
+    """Served-class grids on a projected `GridSpec`, north-up."""
+
+    probabilities: dict[str, np.ndarray]
+    grid: GridSpec
+    valid_time: str
+    cycle_time: str
+    source: str
+
+
+def build_regional_pyramid(
+    fields: RegionalFrontFields, manifest: ModelManifest, n_levels: int = REGIONAL_N_LEVELS
+) -> Pyramid:
+    """Pyramid for a regional grid, kept in its own CRS with (y, x) dims so the
+    viewer reprojects it client-side instead of us resampling it to lat/lon."""
+    if set(fields.probabilities) != set(manifest.served_classes):
+        raise ValueError(f"fields {sorted(fields.probabilities)} != served classes {sorted(manifest.served_classes)}")
+    bad = {k: v.shape for k, v in fields.probabilities.items() if v.shape != fields.grid.shape}
+    if bad:
+        raise ValueError(f"field shape(s) {bad} do not match grid shape {fields.grid.shape}")
+    data_vars = {
+        cls: (("y", "x"), fields.probabilities[cls].astype(np.float32), dict(CLASS_STYLE.get(cls, {})))
+        for cls in manifest.served_classes
+    }
+    ds = xr.Dataset(
+        data_vars=data_vars,
+        coords={"y": fields.grid.y, "x": fields.grid.x},
+        attrs={
+            "model": manifest.name,
+            "valid_time": fields.valid_time,
+            "cycle_time": fields.cycle_time,
+            "served_classes": list(manifest.served_classes),
+            "source": fields.source,
+            "grid": fields.grid.name,
+        },
+    )
+    ds = ds.proj.assign_crs(spatial_ref=fields.grid.crs)
+    return create_pyramid(
+        ds, levels=n_levels, x_dim="x", y_dim="y", method="mean", target_chunk_bytes=SMALL_CHUNK_BYTES
     )
 
 
