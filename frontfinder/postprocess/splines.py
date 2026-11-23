@@ -193,7 +193,14 @@ def line_length_km(lon: np.ndarray, lat: np.ndarray) -> float:
 
 
 def is_periodic(lon: np.ndarray) -> bool:
-    """Return whether evenly spaced longitudes go all the way around the globe."""
+    """Return whether evenly spaced longitudes go all the way around the globe.
+
+    A 2-D longitude table (a projected, curvilinear grid, see
+    ``postprocess.grid_geom``) never wraps: regional domains do not go around
+    the earth.
+    """
+    if lon.ndim > 1:
+        return False
     return len(lon) > 1 and bool(np.isclose(len(lon) * abs(lon[1] - lon[0]), 360.0))
 
 
@@ -222,9 +229,10 @@ def skeleton_graph(mask: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> tuple[
 
     Args:
         mask: Boolean crest grid, dims (latitude, longitude).
-        lat: Latitude of each row.
-        lon: Longitude of each column. If they go all the way around, the first and last columns are
-            neighbours.
+        lat: Latitude of each row (1-D), or of each cell (2-D, same shape as
+            ``mask``, a curvilinear grid).
+        lon: Longitude of each column (1-D), or of each cell (2-D). If they
+            go all the way around, the first and last columns are neighbours.
 
     Returns:
         The (row, col) index of each crest pixel, shape (n, 2), and an (n, n) graph whose edge weights are
@@ -245,7 +253,10 @@ def skeleton_graph(mask: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> tuple[
         starts.append(np.flatnonzero(neighbour >= 0))
         ends.append(neighbour[neighbour >= 0])
     i, j = np.concatenate(starts), np.concatenate(ends)
-    weights = haversine_km(lon[cols[i]], lat[rows[i]], lon[cols[j]], lat[rows[j]])
+    if lat.ndim == 2:  # curvilinear: every pixel carries its own lat/lon
+        weights = haversine_km(lon[rows[i], cols[i]], lat[rows[i], cols[i]], lon[rows[j], cols[j]], lat[rows[j], cols[j]])
+    else:
+        weights = haversine_km(lon[cols[i]], lat[rows[i]], lon[cols[j]], lat[rows[j]])
     graph = scipy.sparse.coo_array((weights, (i, j)), shape=(len(rows), len(rows))).tocsr()
     return np.column_stack([rows, cols]), graph
 
@@ -340,8 +351,11 @@ def path_points(path: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> tuple[np.
     """Return the longitudes and latitudes of a crest path's pixels, with longitudes unwrapped.
 
     Unwrapping keeps a path that crosses a global grid's edge continuous, so distances and angles read
-    along the path instead of jumping 360 degrees.
+    along the path instead of jumping 360 degrees. On a curvilinear grid (2-D ``lat``/``lon`` tables)
+    nothing wraps, and the unwrap is a no-op.
     """
+    if lon.ndim == 2:
+        return np.unwrap(lon[path[:, 0], path[:, 1]], period=360.0), lat[path[:, 0], path[:, 1]]
     return np.unwrap(lon[path[:, 1]], period=360.0), lat[path[:, 0]]
 
 
@@ -676,12 +690,30 @@ def fractional_index(coord: np.ndarray, values: np.ndarray) -> np.ndarray:
     return np.where((values >= coord[0]) & (values <= coord[-1]), index, np.nan)
 
 
-def sample(field: xr.DataArray, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+def sample(field: xr.DataArray, lon: np.ndarray, lat: np.ndarray, geom=None) -> np.ndarray:
     """Bilinearly interpolate a (latitude, longitude) field at points.
 
     On a global grid, longitudes wrap, so 365 reads the same place as 5. Otherwise points off the grid give
     NaN.
+
+    Args:
+        field: 2-D field. Dims (latitude, longitude), or dims (y, x) on a
+            projected grid when ``geom`` is given.
+        lon: Longitudes of the query points, degrees.
+        lat: Latitudes of the query points, degrees.
+        geom: Optional ``postprocess.grid_geom.NativeGridCoords`` for the
+            field's projected grid: points are mapped to fractional (row,
+            col) through the adapter's inverse and bilinearly read in index
+            space -- the same thing the rectilinear path does in (latitude,
+            longitude) index space. Points outside the grid give NaN.
     """
+    if geom is not None:
+        grid = field.transpose(*geom.data_dims).values
+        rows, cols = geom.lonlat_to_pixel(lon, lat)
+        inside = np.isfinite(rows) & np.isfinite(cols)
+        values = np.full(len(lon), np.nan)
+        values[inside] = scipy.ndimage.map_coordinates(grid, [rows[inside], cols[inside]], order=1)
+        return values
     grid = field.transpose("latitude", "longitude").values
     grid_lon = field["longitude"].values
     if is_periodic(grid_lon):
@@ -792,6 +824,7 @@ def symbol_side(
     v: xr.DataArray | None = None,
     previous: PointIndex | None = None,
     others: PointIndex | None = None,
+    geom=None,
 ) -> str:
     """Pick which side of a section its symbols go on.
 
@@ -815,6 +848,8 @@ def symbol_side(
         others: The other arms of the same crest. Sampling points that fall within ``clearance_km`` of one
             of them are dropped, since they read the air across a neighbouring arm rather than across this
             section. A clue whose every sample is dropped falls back to reading them all.
+        geom: Optional ``postprocess.grid_geom.NativeGridCoords`` for the temperature/wind grids, passed
+            through to ``sample`` (their lon/lat values and left/right offsets work the same either way).
 
     Returns:
         "left" or "right".
@@ -827,11 +862,13 @@ def symbol_side(
     near = [clearance_mask(*pts, others, config.clearance_km) for pts in (left, on, right)]
     clues = np.zeros(3)
     if temperature is not None:
-        contrast = sample(temperature, *left) - sample(temperature, *right)
+        contrast = sample(temperature, *left, geom=geom) - sample(temperature, *right, geom=geom)
         # A pair only says something when the air on both sides of the line belongs to this section.
         clues[0] = np.tanh(masked_mean(contrast, near[0] | near[2]) / config.temperature_scale_k)
     if u is not None and v is not None:
-        cross = np.concatenate([sample(u, *pts) * east + sample(v, *pts) * north for pts in (left, on, right)])
+        cross = np.concatenate(
+            [sample(u, *pts, geom=geom) * east + sample(v, *pts, geom=geom) * north for pts in (left, on, right)]
+        )
         clues[1] = np.tanh(masked_mean(cross, np.concatenate(near)) / config.wind_scale_ms)
     if previous is not None:
         moved = motion_km(section.lon, section.lat, east, north, previous, config.max_motion_km)
@@ -847,18 +884,29 @@ def extract_fronts(
     u: xr.DataArray | None = None,
     v: xr.DataArray | None = None,
     previous: list[FrontBoundary] | None = None,
+    geom=None,
+    field_geom=None,
 ) -> list[FrontBoundary]:
     """Turn one time's probability grids into front lines.
 
     Args:
-        probabilities: One variable per front type (e.g. "CF"), dims (latitude, longitude). Types not in
-            any of ``config.groups`` are ignored, as are groups with no types present.
+        probabilities: One variable per front type (e.g. "CF"), dims (latitude, longitude) -- or dims
+            (y, x) on a projected grid when ``geom`` is given. Types not in any of ``config.groups``
+            are ignored, as are groups with no types present.
         config: Spline settings.
         temperature: Optional temperature-like field for orienting symbols, on any grid with the same
             longitude convention as ``probabilities``.
         u: Optional eastward wind (m/s) for orienting symbols.
         v: Optional northward wind (m/s) for orienting symbols.
         previous: Fronts found at the previous time, used to orient symbols by motion.
+        geom: Optional ``postprocess.grid_geom.NativeGridCoords`` for the probability grids: crest
+            geometry reads metric distances from the grid's 2-D lat/lon cell table and field reads go
+            through the adapter's inverse lon/lat -> pixel map. Everything else (smoothing, pinning,
+            tracking, GeoJSON) already works in lon/lat and needs nothing grid-specific. None (the
+            IFS case) keeps the regular 1-D lat/lon path untouched.
+        field_geom: Adapter for the ``temperature``/``u``/``v`` grids when they differ from the
+            probabilities' (the HRRR orientation sidecars are thinned to every other native cell).
+            Ignored unless ``geom`` is given; defaults to ``geom``.
 
     Returns:
         Boundaries, grouped by ``config.groups`` in order.
@@ -866,8 +914,13 @@ def extract_fronts(
     # Sampling reads these many times, so convert them once.
     probabilities = probabilities.astype(np.float64)
     temperature, u, v = (None if f is None else f.astype(np.float64) for f in (temperature, u, v))
-    lat = probabilities["latitude"].values
-    lon = probabilities["longitude"].values
+    if geom is None:
+        lat = probabilities["latitude"].values
+        lon = probabilities["longitude"].values
+        field_geom = None  # the regular path has no use for an adapter
+    else:
+        lat, lon = geom.lat, geom.lon
+        field_geom = geom if field_geom is None else field_geom
     boundaries = []
     for group in config.groups:
         types = [ft for ft in group if ft in probabilities]
@@ -899,12 +952,12 @@ def extract_fronts(
                 # Near a junction the air either side of one arm lies across the other arms, so each arm is
                 # told where the rest of its crest is and ignores the samples that fall on them.
                 others = other_arm_points(smoothed, arm)
-                probs = np.nan_to_num(np.stack([sample(probabilities[ft], line_lon, line_lat) for ft in types]))
+                probs = np.nan_to_num(np.stack([sample(probabilities[ft], line_lon, line_lat, geom=geom) for ft in types]))
                 sections = []
                 for k, start, stop in split_sections(probs, line_lon, line_lat, config.min_section_km):
                     points = slice(start, stop + 1)
                     section = FrontSection(types[k], line_lon[points], line_lat[points], probs[k, points])
-                    section.symbol_side = symbol_side(section, config, temperature, u, v, previous_points, others)
+                    section.symbol_side = symbol_side(section, config, temperature, u, v, previous_points, others, field_geom)
                     sections.append(section)
                 lines.append(sections)
             boundaries.append(FrontBoundary(lines))
