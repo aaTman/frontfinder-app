@@ -115,19 +115,29 @@ OpenFreeMap glyph server does not have 404s and the text never draws.
 `pressureStatus`, `PRESSURE_COLORS`/`PRESSURE_FONT*`), covered by
 `lib.test.js`.
 
-## HRRR (experimental, `?hrrr=1`)
+## HRRR (experimental)
 
-HRRR only appears with `?hrrr=1`, so the default page is unchanged. There is no
-scheduled HRRR pipeline yet: `scripts/publish_hrrr_pilot.py` publishes one
-finished pilot run to a local data directory (`hrrr_3km_c1` -> `hrrr-3km` by
-default, or `--config hrrr_24km_earth` -> `hrrr-24km` for comparison in the
-Models panel).
+`frontfinder.scheduler.cli` publishes `hrrr-3km` (the C1 refiner on HRRR's
+native 3 km grid) alongside the IFS models on every cycle it runs, so HRRR is
+listed in the Models panel on the main page. v2.0.1 remains the only model
+selected by default. `?hrrr=1` makes HRRR the boot layer instead and also
+reveals `hrrr-24km` -- the B0 baseline C1 refines, which has no scheduled
+publisher, so listing it unconditionally would offer a toggle that 404s.
+
+For a local look at a finished pilot run, `scripts/publish_hrrr_pilot.py`
+writes one run to a data directory (`hrrr_3km_c1` -> `hrrr-3km` by default, or
+`--config hrrr_24km_earth` -> `hrrr-24km` for the comparison):
 
 ```bash
 uv run --frozen python scripts/publish_hrrr_pilot.py --root ./hrrr-pilot --out ./hrrr-pilot/viewer-data
 DATA_DIR=./hrrr-pilot/viewer-data node scripts/dev_server.mjs 8080
 # open http://127.0.0.1:8080/?hrrr=1
 ```
+
+`DATA_DIR` replaces the whole data root rather than layering onto it, so in that
+mode only the HRRR stores resolve and `?hrrr=1` is required for the page to
+boot. Production serves both models from one root, which is why the panel there
+lists v2.0.1 and HRRR together.
 
 The store stays on HRRR's native Lambert grid. Its `latest.json` adds a `grid`
 block (`proj4`, edge `bounds`, `lat_ascending`, `dimensions`) that

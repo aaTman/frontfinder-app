@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -154,3 +155,27 @@ class TestPublish:
         write_run(root, grid_name, status)
         with pytest.raises(ValueError):
             publisher.publish(str(root), str(tmp_path / "out"), CASE, CONFIG)
+
+
+INDEX_HTML = Path(__file__).resolve().parents[2] / "webapp" / "index.html"
+
+
+class TestWebAppRegistration:
+    """The scheduler publishes hrrr-3km every cycle, so the main page has to offer it
+    next to the IFS versions instead of hiding it behind a query flag."""
+
+    def test_hrrr_3km_is_listed_without_a_query_flag(self):
+        html = INDEX_HTML.read_text()
+        assert "MODELS[HRRR_MODEL] = {" in html
+        assert not re.search(r"if \(HRRR_ENABLED\) \{\s*MODELS\[HRRR_MODEL\]", html), (
+            "hrrr-3km must be registered unconditionally; ?hrrr=1 only picks which layer boots"
+        )
+
+    def test_model_panel_appears_once_there_are_two_models(self):
+        # The panel ships hidden from the single-model days, so an unconditional
+        # MODELS entry is not enough on its own -- it has to be reachable.
+        assert "if (Object.keys(MODELS).length > 1) {" in INDEX_HTML.read_text()
+
+    def test_hrrr_24km_stays_opt_in_because_nothing_publishes_it(self):
+        # Listing it unconditionally would hand the public a toggle that 404s.
+        assert re.search(r"if \(HRRR_ENABLED\) \{\s*MODELS\[HRRR_24KM_MODEL\]", INDEX_HTML.read_text())

@@ -869,13 +869,20 @@
       // its output again:
       // model_1702: { label: "model_1702", latestPointer: `${ZARR_ROOT}/model_1702/latest.json` },
     };
-    // HRRR is experimental and has no scheduled pipeline yet, so it only
-    // exists behind ?hrrr=1 and the default page is unchanged.
+    // HRRR 3 km (the C1 refiner) is published by the same scheduler cycle as the
+    // IFS models, so it is listed on the main page next to v2.0.1. v2.0.1 stays
+    // the only model selected by default; `?hrrr=1` additionally boots HRRR as
+    // the default layer instead, which is the link to hand someone who is only
+    // there to look at HRRR.
     const HRRR_MODEL = "hrrr-3km";
     const HRRR_24KM_MODEL = "hrrr-24km";
     const HRRR_ENABLED = new URLSearchParams(window.location.search).get("hrrr") === "1";
+    MODELS[HRRR_MODEL] = { label: "HRRR 3 km C1 (experimental)", latestPointer: `${ZARR_ROOT}/${HRRR_MODEL}/latest.json` };
+    // The 24 km B0 baseline is what C1 refines, and it is interesting next to it,
+    // but the cycle publishes only the refined 3 km store, so listing it always
+    // would offer a toggle that 404s. It stays behind ?hrrr=1 for the pilot
+    // stores served locally by scripts/publish_hrrr_pilot.py.
     if (HRRR_ENABLED) {
-      MODELS[HRRR_MODEL] = { label: "HRRR 3 km C1 (experimental)", latestPointer: `${ZARR_ROOT}/${HRRR_MODEL}/latest.json` };
       MODELS[HRRR_24KM_MODEL] = { label: "HRRR 24 km B0 (experimental)", latestPointer: `${ZARR_ROOT}/${HRRR_24KM_MODEL}/latest.json` };
     }
     // Which models are shown by default. spix_wce_loss_modified_dilation was
@@ -2170,7 +2177,10 @@
         });
         container.appendChild(row);
       }
-      if (HRRR_ENABLED) {
+      // The panel ships hidden because the deployment ran with a single model for
+      // a while (a lone checkbox is not a choice). Any second model -- HRRR 3 km,
+      // or a re-enabled IFS version -- brings it back.
+      if (Object.keys(MODELS).length > 1) {
         document.getElementById("model-toggles-label").hidden = false;
         container.hidden = false;
       }
