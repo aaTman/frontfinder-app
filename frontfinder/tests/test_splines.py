@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from frontfinder.ingest.hrrr_grid import HRRR_CRS
 from frontfinder.postprocess import splines
+from frontfinder.postprocess.grid_geom import NativeGridCoords
 
 # Descending latitude, like ERA5 and IFS grids.
 LAT = np.arange(60.0, 19.99, -0.25)
@@ -723,3 +725,65 @@ def test_match_interest_falls_with_distance() -> None:
     near, far, gone = (splines.match_interest(boundary(40.0), boundary(lat), CONFIG) for lat in (40.5, 42.5, 50.0))
     assert 1.0 >= near > far
     assert gone == 0.0
+
+
+# --- coarsening a projected (native) probability grid ---
+
+
+def native_geom(ny: int, nx: int, cell_m: float = 12000.0) -> NativeGridCoords:
+    """A small LCC patch adapter on HRRR's own projection, rows descending like every grid here."""
+    x = np.arange(nx, dtype=float) * cell_m
+    y = (ny - 1 - np.arange(ny, dtype=float)) * cell_m
+    return NativeGridCoords.from_crs(HRRR_CRS, x, y)
+
+
+def test_coarsen_probabilities_block_means_the_values_and_the_coordinates() -> None:
+    geom = native_geom(12, 18)
+    values = np.arange(12 * 18, dtype=float).reshape(12, 18)
+    coarse, coarse_geom = splines.coarsen_probabilities(
+        xr.Dataset({"CF": (("y", "x"), values)}, coords={"y": geom.y, "x": geom.x}), geom, block=3, blur_cells=0.0
+    )
+    assert coarse["CF"].dims == ("y", "x")
+    assert coarse["CF"].shape == (4, 6)
+    assert np.array_equal(coarse["CF"].values, values.reshape(4, 3, 6, 3).mean(axis=(1, 3)))
+    assert np.array_equal(coarse["x"].values, geom.x.reshape(6, 3).mean(axis=1))
+    assert np.array_equal(coarse["y"].values, geom.y.reshape(4, 3).mean(axis=1))
+    assert coarse_geom.shape == (4, 6)  # its cell centres sit at those block-mean coordinates
+    assert np.array_equal(coarse_geom.x, coarse["x"].values) and np.array_equal(coarse_geom.y, coarse["y"].values)
+
+
+def test_coarsen_probabilities_trims_the_remainder_rows_and_columns() -> None:
+    geom = native_geom(13, 19)
+    coarse, coarse_geom = splines.coarsen_probabilities(
+        xr.Dataset({"CF": (("y", "x"), np.ones((13, 19)))}), geom, block=3, blur_cells=0.0
+    )
+    assert coarse["CF"].shape == (4, 6)
+    assert coarse_geom.shape == (4, 6)
+
+
+def test_coarsen_probabilities_reads_nan_as_zero_and_blurs_the_blocks() -> None:
+    geom = native_geom(12, 18)
+    values = np.full((12, 18), 0.6)
+    values[0, 0] = np.nan
+    unblurred, _ = splines.coarsen_probabilities(
+        xr.Dataset({"CF": (("y", "x"), values)}), geom, block=3, blur_cells=0.0
+    )
+    blurred, _ = splines.coarsen_probabilities(
+        xr.Dataset({"CF": (("y", "x"), values)}), geom, block=3, blur_cells=1.5
+    )
+    assert np.isfinite(blurred["CF"].values).all()
+    # the NaN cell only lowers its own block mean; the blur then spreads every block into its neighbours
+    assert unblurred["CF"].values[0, 0] == pytest.approx(8 * 0.6 / 9)
+    assert not np.array_equal(blurred["CF"].values, unblurred["CF"].values)
+
+
+@pytest.mark.parametrize(("block", "blur_cells"), [(0, 0.0), (-1, 0.0), (1, -0.5)])
+def test_coarsen_probabilities_rejects_bad_settings(block: int, blur_cells: float) -> None:
+    geom = native_geom(6, 6)
+    with pytest.raises(ValueError):
+        splines.coarsen_probabilities(xr.Dataset({"CF": (("y", "x"), np.ones((6, 6)))}), geom, block, blur_cells)
+
+
+def test_coarsening_is_off_by_default() -> None:
+    assert splines.SplineConfig().native_block == 1
+    assert splines.SplineConfig().native_blur_cells == 0.0
