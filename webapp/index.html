@@ -32,6 +32,27 @@
   <link rel="preconnect" href="https://esm.sh" crossorigin />
   <link rel="preconnect" href="https://unpkg.com" crossorigin />
   <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
+  <!-- 2026-11-16 (startup-latency pass): pinned to the exact versions the
+       bare @5 ranges were resolving to anyway (confirmed 2026-11-16), so an
+       upstream release can never silently change what this page loads or
+       invalidate the head's modulepreload list. Keep in sync with the unpkg
+       CSS link and the modulepreload URLs below. (No HTML comments INSIDE
+       the script tag below -- importmap contents must be bare JSON.)
+
+       MUST stay above every modulepreload link: per the HTML spec an import
+       map is ignored once any module load/preload has started, and Firefox
+       enforces that ("Import maps are not allowed after a module load or
+       preload has started", then `The specifier "maplibre-gl" was a bare
+       specifier, but was not remapped`) -- the page sat on "loading..." with
+       a blank map in Firefox, while Chrome tolerates the late map. -->
+  <script type="importmap">
+    {
+      "imports": {
+        "maplibre-gl": "https://esm.sh/maplibre-gl@5.24.1",
+        "@carbonplan/zarr-layer": "https://esm.sh/@carbonplan/zarr-layer@0.12.1"
+      }
+    }
+  </script>
   <!-- Same pass: modulepreload the ENTIRE esm.sh import graph up front. The
        importmap only pins the two top-level entries; esm.sh serves those as
        one-line shims that re-export deeper paths, so the real graph is a
@@ -47,7 +68,7 @@
        must match the later import exactly or the preload is wasted. Resolved
        ranges means an esm.sh re-resolution (e.g. zarrita 0.7.7) would strand
        stale preloads as unused small fetches until this list is refreshed;
-       the pinned importmap entries below stay authoritative. -->
+       the pinned importmap entries above stay authoritative. -->
   <link rel="modulepreload" href="https://esm.sh/maplibre-gl@5.24.1" />
   <link rel="modulepreload" href="https://esm.sh/maplibre-gl@5.24.1/es2022/maplibre-gl.mjs" />
   <link rel="modulepreload" href="https://esm.sh/@carbonplan/zarr-layer@0.12.1" />
@@ -76,7 +97,7 @@
   <!-- Pinned to the exact version esm.sh's @5 range resolves to anyway
        (5.24.1, confirmed 2026-11-16): unpkg's @5 alias 302-redirects per
        request, costing a round trip at the front of the waterfall. Keep in
-       sync with the importmap below. -->
+       sync with the importmap above. -->
   <link href="https://unpkg.com/maplibre-gl@5.24.1/dist/maplibre-gl.css" rel="stylesheet" />
   <script>
     // 2026-11-16 (startup-latency pass): this classic inline script runs at
@@ -728,20 +749,6 @@
     </div>
   </div>
 
-  <!-- 2026-11-16 (startup-latency pass): pinned to the exact versions the
-       bare @5 ranges were resolving to anyway (confirmed 2026-11-16), so an
-       upstream release can never silently change what this page loads or
-       invalidate the head's modulepreload list. Keep in sync with the unpkg
-       CSS link and the modulepreload URLs above. (No HTML comments INSIDE
-       the script tag below -- importmap contents must be bare JSON.) -->
-  <script type="importmap">
-    {
-      "imports": {
-        "maplibre-gl": "https://esm.sh/maplibre-gl@5.24.1",
-        "@carbonplan/zarr-layer": "https://esm.sh/@carbonplan/zarr-layer@0.12.1"
-      }
-    }
-  </script>
   <script type="module">
     import maplibregl from "maplibre-gl";
     import { ZarrLayer } from "@carbonplan/zarr-layer";
