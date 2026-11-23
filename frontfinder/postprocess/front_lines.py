@@ -21,6 +21,20 @@ a sidecar falls back to motion alone (and the first step then has no clue at
 all), which is why `rebuild_orientation_fields` exists for cycles published
 before the sidecars did.
 
+HRRR 3 km (`hrrr-3km`) stores stay on HRRR's native Lambert conformal grid:
+level 0 is 1059x1799 with 1-D `x`/`y` coordinates in metres and no lat/lon.
+Front lines for it are extracted ON the native 3 km grid (reprojecting the
+probabilities to lat/lon first would throw away exactly the detail the model
+exists to add); the `probs.npz` sidecar then carries `x`/`y`/`crs` keys
+instead of `lat`/`lon`, the `fields.npz` sidecar likewise (thinned to every
+other native cell), and `postprocess.grid_geom.NativeGridCoords` adapts
+between the pixel and lon/lat worlds (see `splines.extract_fronts`'s `geom`).
+The emitted GeoJSON is WGS84 lon/lat like the IFS one, since the viewer draws
+plain GeoJSON. A published native-grid store with no sidecar has no CRS to
+recover, so its geometry comes from `ingest.hrrr_grid.native_grid` matched to
+the store's own grid name/shape -- and if the sidecar is corrupt or missing
+for a store the loader can't place at all, that step is logged and skipped.
+
 Tracking (one event id per front across lead times) depends on the order of
 steps, so every call re-derives ALL published steps of the cycle, in order,
 rather than keeping state between calls. That is cheap (~0.4 s per step on one
@@ -45,6 +59,8 @@ import os
 
 import numpy as np
 import xarray as xr
+
+from frontfinder.postprocess.grid_geom import NativeGridCoords
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +123,7 @@ def probabilities_filename(store_name: str) -> str:
     return store_name[: -len(".zarr")] + PROBS_SUFFIX
 
 
-def save_probabilities_sidecar(level0: xr.Dataset, path: str) -> None:
+def save_probabilities_sidecar(level0: xr.Dataset, path: str, coords: NativeGridCoords | None = None) -> None:
     """Saves the exact float32 level-0 class grids of a store about to be
     uint8-packed, so the front lines can still be derived from them.
 
@@ -116,22 +132,49 @@ def save_probabilities_sidecar(level0: xr.Dataset, path: str) -> None:
     short front near the threshold. `load_probabilities` prefers this sidecar,
     so with packing on the lines come out exactly as they did from float32
     stores. Call it BEFORE the store is written (packing mutates the tree).
+
+    `coords` selects the coordinate convention the sidecar is written with:
+    None (IFS) stores 1-D `lat`/`lon`; a `NativeGridCoords` (HRRR's projected
+    grid) stores the 1-D `x`/`y` cell coordinates and the CRS instead, since a
+    projected grid has no 1-D lat/lon.
     """
     arrays = {
         code: np.asarray(level0[cls].values, dtype=np.float32) for cls, code in CLASS_CODES.items() if cls in level0
     }
+    if coords is None:
+        grids = {"lat": np.asarray(level0["lat"].values), "lon": np.asarray(level0["lon"].values), **arrays}
+    else:
+        bad = {code: grid.shape for code, grid in arrays.items() if grid.shape != coords.shape}
+        if bad:
+            raise ValueError(f"probability grids {bad} do not match the grid shape {coords.shape}")
+        grids = {"x": np.asarray(coords.x, dtype=np.float64), "y": np.asarray(coords.y, dtype=np.float64), "crs": np.array(coords.crs), **arrays}
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
-        np.savez_compressed(f, lat=np.asarray(level0["lat"].values), lon=np.asarray(level0["lon"].values), **arrays)
+        np.savez_compressed(f, **grids)
     os.replace(tmp, path)
 
 
-def _load_probabilities_sidecar(path: str) -> xr.Dataset:
+def _load_probabilities_sidecar(path: str) -> tuple[xr.Dataset, NativeGridCoords | None]:
+    """`(dataset, geom)` from a sidecar written by `save_probabilities_sidecar`
+    -- the regular (latitude, longitude) layout with geom None, or the native
+    (y, x) layout with the `NativeGridCoords` its `x`/`y`/`crs` describe."""
     with np.load(path) as z:
+        if "lat" not in z.files:
+            x = np.asarray(z["x"], dtype=np.float64)
+            y = np.asarray(z["y"], dtype=np.float64)
+            crs = str(z["crs"].item())
+            dataset = xr.Dataset(
+                {code: (("y", "x"), z[code]) for code in CLASS_CODES.values() if code in z.files},
+                coords={"y": y, "x": x},
+            )
+            return dataset, NativeGridCoords.from_crs(crs, x, y)
         coords = {"latitude": z["lat"], "longitude": z["lon"]}
-        return xr.Dataset(
-            {code: (("latitude", "longitude"), z[code]) for code in CLASS_CODES.values() if code in z.files},
-            coords=coords,
+        return (
+            xr.Dataset(
+                {code: (("latitude", "longitude"), z[code]) for code in CLASS_CODES.values() if code in z.files},
+                coords=coords,
+            ),
+            None,
         )
 
 
@@ -158,6 +201,33 @@ def extract_orientation_fields(
     return {**arrays, "lat": np.asarray(lat, dtype=np.float32), "lon": np.asarray(lon, dtype=np.float32)}
 
 
+def extract_native_orientation_fields(
+    manifest, input_grid: np.ndarray, grid
+) -> dict[str, np.ndarray] | None:
+    """`extract_orientation_fields` for a projected grid: copies the 850 hPa
+    theta-e and wind channels out of an assembled model input grid (H, W,
+    n_channels) laid out on a native `GridSpec`, thinned to every other cell
+    (the same thinning; symbol sides are sampled 150 km off the line, far
+    coarser than 6 km). Coordinates go along as the thinned 1-D `x`/`y` arrays
+    plus the CRS string; nothing is rolled, since projected lon/lat is
+    already signed. The copy matters: inference may reuse `input_grid`.
+    Returns None if the model doesn't carry those channels."""
+    names = manifest.channel_names()
+    if any(name not in names for name in ORIENTATION_CHANNELS.values()):
+        return None
+    stride = 2 if min(input_grid.shape[:2]) >= 200 else 1
+    arrays = {
+        key: np.array(input_grid[::stride, ::stride, names.index(name)], dtype=np.float32)
+        for key, name in ORIENTATION_CHANNELS.items()
+    }
+    return {
+        **arrays,
+        "x": np.asarray(grid.x[::stride], dtype=np.float64),
+        "y": np.asarray(grid.y[::stride], dtype=np.float64),
+        "crs": np.array(grid.crs),
+    }
+
+
 def save_orientation_fields(fields: dict[str, np.ndarray], path: str) -> None:
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
@@ -165,31 +235,62 @@ def save_orientation_fields(fields: dict[str, np.ndarray], path: str) -> None:
     os.replace(tmp, path)
 
 
+def _load_orientation_fields(path: str) -> tuple[dict[str, xr.DataArray], NativeGridCoords | None]:
+    """`load_orientation_fields` with the grid adapter: the sidecar's regular
+    (latitude, longitude) DataArrays with a None geom, or its native (y, x)
+    ones with the `NativeGridCoords` (no lat/lon table -- sampling only needs
+    the inverse) for the thinned grid its `x`/`y`/`crs` describe."""
+    if not os.path.exists(path):
+        return {}, None
+    try:
+        with np.load(path) as z:
+            if "lat" not in z.files:
+                x = np.asarray(z["x"], dtype=np.float64)
+                y = np.asarray(z["y"], dtype=np.float64)
+                crs = str(z["crs"].item())
+                coords = {"y": y, "x": x}
+                return (
+                    {key: xr.DataArray(z[key], dims=("y", "x"), coords=coords) for key in ORIENTATION_CHANNELS},
+                    NativeGridCoords(crs=crs, x=x, y=y),
+                )
+            coords = {"latitude": z["lat"].astype(np.float64), "longitude": z["lon"].astype(np.float64)}
+            return (
+                {
+                    key: xr.DataArray(z[key], dims=("latitude", "longitude"), coords=coords)
+                    for key in ORIENTATION_CHANNELS
+                },
+                None,
+            )
+    except Exception:
+        logger.exception("unreadable orientation fields %s -- orienting without them", path)
+        return {}, None
+
+
 def load_orientation_fields(path: str) -> dict[str, xr.DataArray]:
     """The sidecar as `{temperature, u, v}` DataArrays (dims latitude,
     longitude), or `{}` if there is none or it can't be read."""
-    if not os.path.exists(path):
-        return {}
-    try:
-        with np.load(path) as z:
-            coords = {"latitude": z["lat"].astype(np.float64), "longitude": z["lon"].astype(np.float64)}
-            return {
-                key: xr.DataArray(z[key], dims=("latitude", "longitude"), coords=coords)
-                for key in ORIENTATION_CHANNELS
-            }
-    except Exception:
-        logger.exception("unreadable orientation fields %s -- orienting without them", path)
-        return {}
+    return _load_orientation_fields(path)[0]
 
 
 def load_probabilities(store_path: str) -> xr.Dataset:
     """Reads a published store's full-resolution (level 0) class probabilities
     in the layout `postprocess.splines` expects: one variable per front type
-    code (`CF`, `WF`, ...), dims (latitude, longitude).
+    code (`CF`, `WF`, ...), dims (latitude, longitude) -- or dims (y, x) for a
+    store on a projected grid, which `_load_probabilities` pairs with the
+    grid adapter the sampling needs.
 
     Uses the `<store>.probs.npz` float32 sidecar when there is one (stores
     written with uint8 packing on -- see `save_probabilities_sidecar`),
-    otherwise the store itself."""
+    otherwise the store itself. A published native-grid store carries no CRS
+    of its own, so without a sidecar its geometry is taken from the ingest
+    grid definition (`ingest.hrrr_grid.native_grid`) matched by the store's
+    own grid name/shape; a store the loader cannot place raises, which its
+    callers log and skip.
+    """
+    return _load_probabilities(store_path)[0]
+
+
+def _load_probabilities(store_path: str) -> tuple[xr.Dataset, NativeGridCoords | None]:
     sidecar = os.path.join(os.path.dirname(store_path), probabilities_filename(os.path.basename(store_path)))
     if os.path.exists(sidecar):
         try:
@@ -202,8 +303,33 @@ def load_probabilities(store_path: str) -> xr.Dataset:
     present = {cls: code for cls, code in CLASS_CODES.items() if cls in ds}
     if not present:
         raise ValueError(f"{store_path} has none of the front classes {sorted(CLASS_CODES)}")
-    ds = ds[list(present)].rename(present).rename(lat="latitude", lon="longitude")
-    return ds.drop_vars("spatial_ref", errors="ignore").load()
+    if "lat" in ds.coords and "lon" in ds.coords:
+        ds = ds[list(present)].rename(present).rename(lat="latitude", lon="longitude")
+        return ds.drop_vars("spatial_ref", errors="ignore").load(), None
+    if not {"x", "y"}.issubset(ds.coords):
+        raise ValueError(f"{store_path} has neither lat/lon nor x/y coordinates -- cannot place it on the earth")
+    return (
+        ds[list(present)].rename(present).drop_vars("spatial_ref", errors="ignore").load(),
+        _native_coords_for_store(ds),
+    )
+
+
+def _native_coords_for_store(ds: xr.Dataset) -> NativeGridCoords:
+    """The grid adapter for a published store kept on a projected grid.
+
+    The store itself carries only its 1-D x/y cell coordinates (the viewer
+    reads the CRS from `latest.json`), so the 2-D lat/lon geometry comes from
+    the ingest grid definition that produced it, matched by the store's own
+    `grid` attribute, falling back to its shape."""
+    from frontfinder.ingest.hrrr_grid import SUPPORTED_COARSEN, native_grid
+
+    shape = (int(ds.sizes["y"]), int(ds.sizes["x"]))
+    name = ds.attrs.get("grid")
+    for coarsen in SUPPORTED_COARSEN:
+        grid = native_grid(coarsen)
+        if grid.shape == shape and (name is None or name == grid.name):
+            return NativeGridCoords.from_grid_spec(grid)
+    raise ValueError(f"no ingest grid matches the published store's shape {shape} (grid name {name!r})")
 
 
 def _viewer_features(collection: dict) -> list[dict]:
@@ -243,8 +369,8 @@ def write_front_lines(
     for entry in step_entries:
         store_name = entry["store"]
         try:
-            probabilities = load_probabilities(os.path.join(model_dir, store_name))
-            fields = load_orientation_fields(os.path.join(model_dir, fields_filename(store_name)))
+            probabilities, probs_geom = _load_probabilities(os.path.join(model_dir, store_name))
+            fields, field_geom = _load_orientation_fields(os.path.join(model_dir, fields_filename(store_name)))
             boundaries = splines.extract_fronts(
                 probabilities,
                 config,
@@ -252,6 +378,8 @@ def write_front_lines(
                 u=fields.get("u"),
                 v=fields.get("v"),
                 previous=previous,
+                geom=probs_geom,
+                field_geom=field_geom,
             )
             splines.track_fronts(previous, boundaries, config, new_ids)
             collection = splines.to_geojson(boundaries, entry["valid_time"])

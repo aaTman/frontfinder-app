@@ -420,7 +420,14 @@ def main(argv: list[str] | None = None) -> int:
             hrrr_config = build_hrrr_run_config(args.model_dir, base_predictor=base_predictor)
             if hrrr_config is not None:
                 hrrr_results = run_hrrr_cycle(
-                    hrrr_config, source_3km, source_24km, hrrr_date, hrrr_hour, args.output_root
+                    hrrr_config,
+                    source_3km,
+                    source_24km,
+                    hrrr_date,
+                    hrrr_hour,
+                    args.output_root,
+                    front_lines=args.front_lines,
+                    front_line_threshold=args.front_line_threshold,
                 )
                 logger.info("HRRR cycle %s-%02dZ complete: %d step(s)", hrrr_date, hrrr_hour, len(hrrr_results))
         except Exception:
