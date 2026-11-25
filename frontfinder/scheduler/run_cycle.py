@@ -676,9 +676,9 @@ def run_hrrr_cycle(
     front_line_config = None
     if front_lines:
         try:
-            from frontfinder.postprocess.front_lines import default_config
+            from frontfinder.postprocess.front_lines import native_config
 
-            front_line_config = default_config(front_line_threshold)
+            front_line_config = native_config(front_line_threshold)
         except Exception:
             logger.exception("front lines unavailable (could not import the splines module) -- continuing without them")
             front_lines = False

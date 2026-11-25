@@ -113,6 +113,11 @@ class SplineConfig:
         pin_taper_km: Distance over which a pinned end blends back into where the spline put it.
         clearance_km: Symbol sampling points closer than this to another arm of the same crest are ignored,
             so a junction does not read the air across its neighbouring arms.
+        native_block: Projected grids only: block-mean the probability grids by this factor before crest
+            extraction, which brings a fine, terrain-textured grid (HRRR's 3 km) closer to the coarse
+            resolution these settings were tuned on. Ignored when ``extract_fronts`` gets no ``geom``.
+        native_blur_cells: Projected grids only: Gaussian sigma, in (block-averaged) cells, applied after
+            the block mean. 0 skips the blur.
     """
 
     groups: list[list[str]] = dataclasses.field(
@@ -138,6 +143,8 @@ class SplineConfig:
     corner_window_km: float = 100.0
     pin_taper_km: float = 75.0
     clearance_km: float = 100.0
+    native_block: int = 1
+    native_blur_cells: float = 0.0
 
 
 @dataclasses.dataclass
@@ -202,6 +209,47 @@ def is_periodic(lon: np.ndarray) -> bool:
     if lon.ndim > 1:
         return False
     return len(lon) > 1 and bool(np.isclose(len(lon) * abs(lon[1] - lon[0]), 360.0))
+
+
+def coarsen_probabilities(probabilities: xr.Dataset, geom, block: int, blur_cells: float):
+    """Block-mean a projected grid's probability grids, then blur them, before crest extraction.
+
+    A 3 km probability grid is textured by the terrain under it, so thinning leaves fragmented crests --
+    short arms, forks and hooks -- that one cubic per arm cannot smooth. Averaging every ``block`` x
+    ``block`` cell patch (and blurring the result) brings the grid closer to the ~28 km resolution
+    ``SplineConfig`` was tuned on, and the rest of the pipeline runs on it unchanged.
+
+    Args:
+        probabilities: One variable per front type, dims (y, x) on ``geom``'s grid. NaNs count as zero.
+        geom: ``postprocess.grid_geom.NativeGridCoords`` adapter for the probabilities' projected grid.
+        block: Block factor to average by; trailing rows/columns that do not fill a block are trimmed.
+        blur_cells: Gaussian sigma, in (block-averaged) cells, applied after the block mean. 0 skips it.
+
+    Returns:
+        The coarsened dataset (dims (y, x), coords ``y``/``x``) and the adapter of the coarse grid, whose
+        cell centres sit at the mean coordinate of each block.
+
+    Raises:
+        ValueError: ``block`` < 1 or ``blur_cells`` < 0.
+    """
+    from frontfinder.postprocess.grid_geom import NativeGridCoords  # lazy: keeps this vendored module standalone
+
+    if block < 1:
+        raise ValueError(f"block must be >= 1, got {block}")
+    if blur_cells < 0:
+        raise ValueError(f"blur_cells must be >= 0, got {blur_cells}")
+    ny, nx = geom.shape
+    ny2, nx2 = ny // block, nx // block
+    grids = {}
+    for name in probabilities.data_vars:
+        values = np.nan_to_num(probabilities[name].values.astype(np.float64))[: ny2 * block, : nx2 * block]
+        values = values.reshape(ny2, block, nx2, block).mean(axis=(1, 3))
+        if blur_cells > 0:
+            values = scipy.ndimage.gaussian_filter(values, blur_cells, mode="nearest")
+        grids[name] = (("y", "x"), values)
+    x = geom.x[: nx2 * block].reshape(nx2, block).mean(axis=1)
+    y = geom.y[: ny2 * block].reshape(ny2, block).mean(axis=1)
+    return xr.Dataset(grids, coords={"y": y, "x": x}), NativeGridCoords.from_crs(geom.crs, x, y)
 
 
 def crest_mask(probability: np.ndarray, threshold: float, periodic: bool = False) -> np.ndarray:
@@ -919,8 +967,13 @@ def extract_fronts(
         lon = probabilities["longitude"].values
         field_geom = None  # the regular path has no use for an adapter
     else:
-        lat, lon = geom.lat, geom.lon
+        # The orientation fields keep the ORIGINAL grid's adapter: coarsening below re-lays-out only the
+        # probabilities, and `sample` reads a field through whichever adapter it is handed -- so capturing
+        # the fields' adapter before the coarsening is what keeps their mapping on the native grid.
         field_geom = geom if field_geom is None else field_geom
+        if config.native_block > 1 or config.native_blur_cells > 0:
+            probabilities, geom = coarsen_probabilities(probabilities, geom, config.native_block, config.native_blur_cells)
+        lat, lon = geom.lat, geom.lon
     boundaries = []
     for group in config.groups:
         types = [ft for ft in group if ft in probabilities]

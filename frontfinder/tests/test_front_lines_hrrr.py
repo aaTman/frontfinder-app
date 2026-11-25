@@ -255,6 +255,80 @@ def test_symbol_sides_on_the_curvilinear_grid_match_the_1d_case_for_a_known_grad
     assert cs.symbol_side == rs.symbol_side == expected(cs)
 
 
+# --- coarsening before crest extraction: config + a native-grid run ---
+
+
+def test_default_config_stays_the_ifs_config_and_native_config_coarsens():
+    """`default_config()` keeps its pre-coarsening values (it is what the IFS path and the golden test
+    use); `native_config()` is the same config with the native-grid coarsening turned on."""
+    default = front_lines.default_config()
+    assert (default.threshold, default.match_threshold) == (0.25, 0.5)
+    assert default.native_block == 1 and default.native_blur_cells == 0.0
+
+    native = front_lines.native_config()
+    assert native.native_block == front_lines.NATIVE_BLOCK == 3
+    assert native.native_blur_cells == front_lines.NATIVE_BLUR_CELLS == 3.5
+    assert native.threshold == front_lines.NATIVE_FRONT_LINE_THRESHOLD
+    assert native.match_threshold == 0.5  # everything else carries over from default_config()
+    assert front_lines.native_config(0.3).threshold == 0.3
+
+
+def trough_temperature_field() -> np.ndarray:
+    """A theta-e field with a trough at row 15: `310 + 0.5 * |row - 15|` K. The line at row 30 sees a
+    negative (left-minus-right) contrast through the native adapter's real 150 km offsets (rows ~17.5
+    and ~42.5), but samples read through a wrongly bound COARSE-grid adapter -- whose index space puts
+    them near rows ~5.5 and ~13.8, across the trough's north flank -- see a positive one. A mis-bound
+    `field_geom` therefore flips the symbol side, which a monotonic gradient (like `warm_north_field`)
+    would hide."""
+    rows = np.abs(np.arange(NY, dtype=float)[:, None] - 15.0)
+    return (310.0 + 0.5 * rows * np.ones((1, NX))).astype(np.float32)
+
+
+def test_extract_fronts_coarsens_the_native_grid_without_moving_the_symbol_sides():
+    """The straight synthetic band still yields one front when the 12 km grid is block-averaged by 3 and
+    blurred, every point stays inside the grid, and -- the pitfall -- the orientation fields stay mapped
+    through the ORIGINAL (native) adapter: their symbol sides match the uncoarsened run exactly (and
+    `trough_temperature_field` makes that equality fail if the fields were re-bound to the coarse grid)."""
+    from frontfinder.postprocess import splines
+
+    grid = lcc_patch()
+    coords = NativeGridCoords.from_grid_spec(grid)
+    temp = trough_temperature_field()
+    curv = xr.Dataset({"CF": (("y", "x"), cold_band(30.0))}, coords={"y": grid.y, "x": grid.x})
+    fields = {
+        name: xr.DataArray(array, dims=("y", "x"), coords={"y": grid.y, "x": grid.x})
+        for name, array in (("temperature", temp), ("u", np.zeros_like(temp)), ("v", np.zeros_like(temp)))
+    }
+    config = splines.SplineConfig(native_block=3, native_blur_cells=1.0)
+    coarse = splines.extract_fronts(curv, config, geom=coords, **fields)
+    plain = splines.extract_fronts(curv, splines.SplineConfig(), geom=coords, **fields)
+
+    def sections(fronts):
+        return [s for b in fronts for line in b.lines for s in line]
+
+    coarse_sections = sections(coarse)
+    assert len(coarse) >= 1 and coarse_sections
+    lon_min, lon_max = float(grid.lon.min()) - 1.0, float(grid.lon.max()) + 1.0
+    lat_min, lat_max = float(grid.lat.min()) - 1.0, float(grid.lat.max()) + 1.0
+    for section in coarse_sections:
+        assert np.all((section.lon >= lon_min) & (section.lon <= lon_max))
+        assert np.all((section.lat >= lat_min) & (section.lat <= lat_max))
+
+    # compare the sides in one frame: the tracer may walk the two crests in opposite directions, which
+    # flips the raw left/right strings without moving the symbols on the earth
+    def side_facing_east(section) -> str:
+        side = section.symbol_side
+        if section.lon[-1] < section.lon[0]:  # walked westward: left and right swap
+            side = "right" if side == "left" else "left"
+        return side
+
+    # the real 150 km offsets see a negative contrast (the trough's far flank), so a CF's symbols sit
+    # on its right facing east; samples squeezed through a coarse-grid adapter would sit across the
+    # trough and land on the left instead
+    assert [side_facing_east(s) for s in coarse_sections] == [side_facing_east(s) for s in sections(plain)]
+    assert [side_facing_east(s) for s in coarse_sections] == ["right"]
+
+
 # --- failing steps are logged and skipped, never raised ---
 
 
@@ -333,6 +407,30 @@ def test_run_hrrr_cycle_publishes_sidecars_geojson_and_fronts_keys(tmp_path):
         "2026-08-19T12Z_f000.fronts.geojson",
         "2026-08-19T12Z_f006.fronts.geojson",
     ]
+
+
+def test_run_hrrr_cycle_hands_the_native_config_to_front_lines(tmp_path, monkeypatch):
+    """The scheduler wires `run_hrrr_cycle` to the coarsened config (thresholds aside), where `run_cycle`
+    (IFS) keeps the default one."""
+    from frontfinder.scheduler.run_cycle import run_hrrr_cycle
+
+    seen = []
+    real = front_lines.write_front_lines
+
+    def spy(model_dir, step_entries, config=None):
+        seen.append(config)
+        return real(model_dir, step_entries, config)
+
+    monkeypatch.setattr(front_lines, "write_front_lines", spy)
+    run_config, source_3km, source_24km = _cycle_fixtures()
+    run_hrrr_cycle(
+        run_config, source_3km, source_24km, "2026-08-19", 12, str(tmp_path), steps=(0,), front_lines=True,
+        front_line_threshold=0.9,
+    )
+    assert seen and all(
+        config.native_block == 3 and config.native_blur_cells == 3.5 and config.threshold == 0.9
+        for config in seen
+    )
 
 
 def test_a_failing_hrrr_step_is_skipped_and_latest_json_stays_intact(tmp_path, monkeypatch):

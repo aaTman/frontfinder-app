@@ -52,6 +52,7 @@ also recreates the orientation sidecars from the GRIB cache):
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import itertools
 import json
 import logging
@@ -79,6 +80,13 @@ CLASS_CODES: dict[str, str] = {
 FRONT_LINE_THRESHOLD = 0.25
 # Total interest two fronts at consecutive steps need to count as the same event (splines default 0.6).
 FRONT_MATCH_THRESHOLD = 0.5
+# HRRR's native 3 km probabilities are block-averaged and blurred to roughly the IFS resolution before
+# crest extraction (see `splines.coarsen_probabilities`); blurring lowers the peaks, so the native crest
+# cutoff sits below FRONT_LINE_THRESHOLD. 0.20 keeps total front length within ~7% of the un-coarsened
+# lines on the 2026-11-16/18/20 12Z f000 fields (`scripts/hrrr_spline_parity.py`).
+NATIVE_FRONT_LINE_THRESHOLD = 0.20
+NATIVE_BLOCK = 3
+NATIVE_BLUR_CELLS = 3.5
 FRONTS_SUFFIX = ".fronts.geojson"
 FIELDS_SUFFIX = ".fields.npz"
 PROBS_SUFFIX = ".probs.npz"
@@ -99,6 +107,16 @@ def default_config(threshold=None):
     return splines.SplineConfig(
         threshold=FRONT_LINE_THRESHOLD if threshold is None else threshold,
         match_threshold=FRONT_MATCH_THRESHOLD,
+    )
+
+
+def native_config(threshold=None):
+    """SplineConfig for a model kept on its native projected grid (HRRR): the default settings with the
+    probabilities coarsened before crest extraction, at the native crest cutoff."""
+    return dataclasses.replace(
+        default_config(NATIVE_FRONT_LINE_THRESHOLD if threshold is None else threshold),
+        native_block=NATIVE_BLOCK,
+        native_blur_cells=NATIVE_BLUR_CELLS,
     )
 
 
@@ -419,9 +437,20 @@ def attach_front_lines(model_dir: str, step_entries: list[dict], config: object 
             entry.pop("fronts", None)
 
 
+def _config_for_pointer(pointer: dict):
+    """The spline config a published pointer's model wants: HRRR grids (a
+    `grid` key naming an `hrrr-*` grid) get the coarsened `native_config()`,
+    everything else the IFS `default_config()`."""
+    grid = pointer.get("grid") or {}
+    return native_config() if str(grid.get("name", "")).startswith("hrrr") else default_config()
+
+
 def backfill(output_root: str, model: str | None = None, config: object | None = None) -> dict[str, int]:
     """Generates front lines for the cycle each model's `latest.json` points
     at and adds the `fronts` keys to that file. Returns `{model: n_steps}`.
+
+    With `config` None each model gets its own: `native_config()` when its
+    `latest.json` names an HRRR grid, `default_config()` otherwise.
 
     Not safe to run while `run_cycle` is publishing to the same model (both
     rewrite `latest.json`); the scheduler's next step would otherwise
@@ -437,7 +466,7 @@ def backfill(output_root: str, model: str | None = None, config: object | None =
         with open(pointer_path) as f:
             pointer = json.load(f)
         before = json.dumps(pointer, sort_keys=True)
-        attach_front_lines(model_dir, pointer["steps"], config)
+        attach_front_lines(model_dir, pointer["steps"], config or _config_for_pointer(pointer))
         if json.dumps(pointer, sort_keys=True) != before:  # leave retired models' pointers alone
             _write_json_atomically(pointer_path, pointer, compact=False)  # same formatting run_cycle uses
         counts[name] = sum(1 for s in pointer["steps"] if "fronts" in s)
