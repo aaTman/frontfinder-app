@@ -545,7 +545,6 @@
     </div>
     <div id="model-toggles-label" class="panel-subheading" hidden>Models</div>
     <div id="model-toggles" hidden></div>
-    <div id="domain-note" hidden style="font-size: 11px; opacity: 0.8; margin: 2px 0 6px; max-width: 220px;">Shaded band: within about 770 km of the HRRR boundary, where fronts are less reliable.</div>
     <div id="class-toggles-label" class="panel-subheading">Front &amp; trough types</div>
     <div id="class-toggles"></div>
     <div id="overlay-toggles-label" class="panel-subheading">Overlays</div>
@@ -781,7 +780,6 @@
       PRESSURE_FONT,
       PRESSURE_FONT_BOLD,
       layerGridOptions,
-      domainUrl,
       initializationLabel,
     } from "./lib.js";
 
@@ -1103,7 +1101,6 @@
         revealToken: 0, // see revealStep
         // From latest.json; all null for a global IFS model.
         grid: null,
-        domain: null,
         sourceLabel: null,
       };
     }
@@ -2016,7 +2013,6 @@
     // the front lines, which keeps the typed lines and their symbols the
     // topmost thing on the map.
     function raiseOverlays() {
-      for (const id of DOMAIN_LAYERS) if (map.getLayer(id)) map.moveLayer(id);
       for (const id of PRESSURE_LAYERS) if (map.getLayer(id)) map.moveLayer(id);
       raiseFrontLines();
     }
@@ -2118,59 +2114,6 @@
       });
     }
 
-    // Shades the band near a regional model's boundary, where the network
-    // has lost context and its fronts are less reliable.
-    const DOMAIN_SOURCE = "model-domain";
-    const DOMAIN_FILL_LAYER = "model-domain-fill";
-    const DOMAIN_LINE_LAYER = "model-domain-line";
-    const DOMAIN_LAYERS = [DOMAIN_FILL_LAYER, DOMAIN_LINE_LAYER];
-    let domainFetchToken = 0;
-
-    function setDomainVisibility(visible) {
-      for (const id of DOMAIN_LAYERS) {
-        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
-      }
-    }
-
-    async function refreshDomainOverlay() {
-      const token = ++domainFetchToken;
-      const key = [...selectedModels].find((k) => modelStates.get(k).domain);
-      document.getElementById("domain-note").hidden = !key;
-      if (!key) {
-        setDomainVisibility(false);
-        return;
-      }
-      try {
-        const res = await fetch(domainUrl(ZARR_ROOT, key, modelStates.get(key).domain));
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (token !== domainFetchToken) return; // the selection changed mid-fetch
-        if (map.getSource(DOMAIN_SOURCE)) {
-          map.getSource(DOMAIN_SOURCE).setData(data);
-        } else {
-          map.addSource(DOMAIN_SOURCE, { type: "geojson", data });
-          map.addLayer({
-            id: DOMAIN_FILL_LAYER,
-            type: "fill",
-            source: DOMAIN_SOURCE,
-            paint: { "fill-color": "#2b3446", "fill-opacity": 0.16 },
-          });
-          map.addLayer({
-            id: DOMAIN_LINE_LAYER,
-            type: "line",
-            source: DOMAIN_SOURCE,
-            paint: { "line-color": "#2b3446", "line-width": 1, "line-opacity": 0.7, "line-dasharray": [3, 2] },
-          });
-        }
-        setDomainVisibility(true);
-        raiseOverlays();
-      } catch (err) {
-        console.warn("domain overlay unavailable", err);
-        document.getElementById("domain-note").hidden = true;
-        setDomainVisibility(false);
-      }
-    }
-
     function buildModelToggles() {
       const container = document.getElementById("model-toggles");
       container.innerHTML = "";
@@ -2180,7 +2123,6 @@
         row.innerHTML = `<input type="checkbox" data-model="${key}" ${selectedModels.has(key) ? "checked" : ""} /> ${info.label}`;
         row.querySelector("input").addEventListener("change", (e) => {
           onModelToggle(key, e.target.checked);
-          refreshDomainOverlay();
         });
         container.appendChild(row);
       }
@@ -2230,7 +2172,7 @@
         if (!res.ok) throw new Error(`no published run for ${model} (HTTP ${res.status})`);
         payload = await res.json();
       }
-      const { cycle_time, steps, expected_steps, grid, domain, source_label } = payload;
+      const { cycle_time, steps, expected_steps, grid, source_label } = payload;
       if (!Array.isArray(steps) || steps.length === 0) {
         throw new Error(`latest.json for ${model} has no published steps`);
       }
@@ -2239,7 +2181,6 @@
         steps,
         expectedSteps: Array.isArray(expected_steps) ? expected_steps : fallbackExpectedSteps(cycle_time),
         grid: grid ?? null,
-        domain: domain ?? null,
         sourceLabel: source_label ?? null,
       };
     }
@@ -3021,14 +2962,12 @@
       state.activeCycleTime = null; // refreshMeta() reads this as "loading…"
       refreshMeta();
       try {
-        const { cycleTime, steps, expectedSteps, grid, domain, sourceLabel } = await resolveLatestRun(model);
+        const { cycleTime, steps, expectedSteps, grid, sourceLabel } = await resolveLatestRun(model);
         state.activeCycleTime = cycleTime;
         state.activeSteps = steps;
         state.expectedSteps = expectedSteps;
         state.grid = grid;
-        state.domain = domain;
         state.sourceLabel = sourceLabel;
-        refreshDomainOverlay();
         if (model === primaryModel) {
           document.getElementById("time-init").textContent = initializationLabel(sourceLabel, formatHumanUTC(cycleTime));
           setupTimeSlider();

@@ -37,7 +37,6 @@ import {
   pressureStatus,
   pressureInitialState,
   layerGridOptions,
-  domainUrl,
   initializationLabel,
 } from "./lib.js";
 
@@ -59,12 +58,6 @@ test("layerGridOptions places a regional store in its own CRS", () => {
     proj4: grid.proj4,
     spatialDimensions: { lat: "y", lon: "x" },
   });
-});
-
-test("domainUrl is null when a model publishes no domain", () => {
-  assert.equal(domainUrl("/data", "hrrr-24km", "domain.geojson"), "/data/hrrr-24km/domain.geojson");
-  assert.equal(domainUrl("/data", "v2.0.1", undefined), null);
-  assert.equal(domainUrl("/data", "v2.0.1", ""), null);
 });
 
 test("initializationLabel names the source and defaults to IFS", () => {
