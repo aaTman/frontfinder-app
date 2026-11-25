@@ -143,9 +143,7 @@ The store stays on HRRR's native Lambert grid. Its `latest.json` adds a `grid`
 block (`proj4`, edge `bounds`, `lat_ascending`, `dimensions`) that
 `layerGridOptions` passes to `ZarrLayer`, which reprojects client-side. A
 pointer without `grid` is a global lat/lon model. `source_label` names the
-cycle label, and `domain` points to a GeoJSON band drawn over the area within
-~770 km of the boundary (256 cells at 3 km, 32 cells at 24 km), where the model
-loses context.
+cycle label.
 
 Models are matched by forecast hour, not valid time. The pilot HRRR run is one
 fixed cycle, so with v2.0.1 also on, the two layers usually show different
